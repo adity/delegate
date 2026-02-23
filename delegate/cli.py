@@ -1030,6 +1030,177 @@ def network_reset(ctx: click.Context) -> None:
 
 
 # ──────────────────────────────────────────────────────────────
+# delegate satellite add / remove / list / start / stop / status
+# ──────────────────────────────────────────────────────────────
+
+@main.group()
+def satellite() -> None:
+    """Manage satellite workers for distributed execution."""
+    pass
+
+
+@satellite.command("add")
+@click.argument("name")
+@click.pass_context
+def satellite_add(ctx: click.Context, name: str) -> None:
+    """Register a new satellite and generate its bearer token.
+
+    NAME is a unique identifier for the satellite (e.g. 'rana-ai-server').
+    The token is displayed once and cannot be retrieved later.
+    """
+    from delegate.auth import add_satellite
+    from delegate.fmt import success
+
+    hc_home = _get_home(ctx)
+    token = add_satellite(hc_home, name)
+    success(f"Satellite '{name}' registered")
+    click.echo()
+    click.echo("Bearer token (save this — it cannot be retrieved later):")
+    click.echo(f"  {token}")
+    click.echo()
+    click.echo("On the satellite machine, start with:")
+    click.echo(f"  delegate satellite start --coordinator http://<coordinator>:3548 --token {token} --id {name}")
+
+
+@satellite.command("remove")
+@click.argument("name")
+@click.pass_context
+def satellite_remove(ctx: click.Context, name: str) -> None:
+    """Remove a registered satellite."""
+    from delegate.auth import remove_satellite
+
+    hc_home = _get_home(ctx)
+    if remove_satellite(hc_home, name):
+        click.echo(f"Satellite '{name}' removed")
+    else:
+        click.echo(f"Satellite '{name}' not found")
+
+
+@satellite.command("list")
+@click.pass_context
+def satellite_list(ctx: click.Context) -> None:
+    """List registered satellites."""
+    from delegate.auth import list_satellites
+
+    hc_home = _get_home(ctx)
+    sats = list_satellites(hc_home)
+    if not sats:
+        click.echo("No satellites registered.")
+        return
+
+    click.echo("Satellites:")
+    for s in sats:
+        click.echo(f"  - {click.style(s['name'], bold=True)} (registered: {s['created_at']})")
+
+
+@satellite.command("start")
+@click.option("--coordinator", required=True, help="Coordinator URL (e.g. http://mac-mini:3548)")
+@click.option("--token", required=True, help="Bearer token from 'delegate satellite add'")
+@click.option("--id", "satellite_id", required=True, help="Satellite identifier (must match coordinator registration)")
+@click.option("--poll-interval", default=2.0, help="Poll interval in seconds (default: 2.0)")
+@click.option("--max-concurrent", default=8, help="Max concurrent agent turns (default: 8)")
+@click.pass_context
+def satellite_start(ctx: click.Context, coordinator: str, token: str, satellite_id: str, poll_interval: float, max_concurrent: int) -> None:
+    """Start the satellite daemon (run on the remote machine).
+
+    Polls the coordinator for work and executes agent turns locally.
+    """
+    import asyncio
+    from delegate.satellite import SatelliteDaemon
+
+    daemon = SatelliteDaemon(
+        coordinator_url=coordinator.rstrip("/"),
+        satellite_id=satellite_id,
+        auth_token=token,
+        poll_interval=poll_interval,
+        max_concurrent=max_concurrent,
+    )
+    click.echo(f"Starting satellite '{satellite_id}' → {coordinator}")
+    try:
+        asyncio.run(daemon.run())
+    except KeyboardInterrupt:
+        click.echo("Satellite stopped")
+
+
+@satellite.command("stop")
+def satellite_stop() -> None:
+    """Stop the satellite daemon (sends SIGTERM to the running process)."""
+    click.echo("Use Ctrl+C or send SIGTERM to the satellite process to stop it.")
+
+
+@satellite.command("status")
+def satellite_status() -> None:
+    """Check satellite daemon status."""
+    click.echo("Satellite status check not yet implemented. Use process monitoring tools.")
+
+
+# ──────────────────────────────────────────────────────────────
+# delegate agent set-host
+# ──────────────────────────────────────────────────────────────
+
+@agent.command("set-host")
+@click.argument("team")
+@click.argument("name")
+@click.argument("host", required=False, default=None)
+@click.option("--local", is_flag=True, help="Set agent to run locally on the coordinator")
+@click.pass_context
+def agent_set_host(ctx: click.Context, team: str, name: str, host: str | None, local: bool) -> None:
+    """Set which satellite an agent runs on.
+
+    TEAM is the team name. NAME is the agent name.
+    HOST is the satellite identifier (e.g. 'rana-ai-server').
+    Use --local to move the agent back to the coordinator.
+    """
+    import yaml
+    from delegate.paths import agent_dir as _ad
+
+    hc_home = _get_home(ctx)
+    ad = _ad(hc_home, team, name)
+    state_file = ad / "state.yaml"
+    if not state_file.exists():
+        raise click.ClickException(f"Agent '{name}' not found in team '{team}'")
+
+    state = yaml.safe_load(state_file.read_text()) or {}
+    if local:
+        state["host"] = None
+        state_file.write_text(yaml.dump(state, default_flow_style=False, sort_keys=False))
+        click.echo(f"Agent '{name}' set to run locally (coordinator)")
+    elif host:
+        state["host"] = host
+        state_file.write_text(yaml.dump(state, default_flow_style=False, sort_keys=False))
+        click.echo(f"Agent '{name}' set to run on satellite '{host}'")
+    else:
+        raise click.ClickException("Provide a satellite HOST or use --local")
+
+
+# ──────────────────────────────────────────────────────────────
+# delegate config set passphrase
+# ──────────────────────────────────────────────────────────────
+
+@config_set.command("passphrase")
+@click.argument("value", required=False, default=None)
+@click.option("--disable", is_flag=True, help="Disable passphrase authentication")
+@click.pass_context
+def config_set_passphrase(ctx: click.Context, value: str | None, disable: bool) -> None:
+    """Set a passphrase for web UI authentication.
+
+    When set, the web UI requires login. Use --disable to remove.
+    """
+    from delegate.auth import set_passphrase, disable_passphrase
+    from delegate.fmt import success
+
+    hc_home = _get_home(ctx)
+    if disable:
+        disable_passphrase(hc_home)
+        success("Web UI passphrase authentication disabled")
+    elif value:
+        set_passphrase(hc_home, value)
+        success("Web UI passphrase set")
+    else:
+        raise click.ClickException("Provide a passphrase value or use --disable")
+
+
+# ──────────────────────────────────────────────────────────────
 # delegate nuke
 # ──────────────────────────────────────────────────────────────
 

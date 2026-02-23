@@ -572,6 +572,7 @@ def _create_telephone(
     role: str = "engineer",
     model: str | None = None,
     ad: Path | None = None,
+    mcp_server_factory: Any | None = None,
 ) -> Any:
     """Create a new Telephone for an agent.
 
@@ -599,6 +600,11 @@ def _create_telephone(
 
     The ``on_rotation`` callback writes the rotation summary
     to the agent's ``context.md``.
+
+    When ``mcp_server_factory`` is provided, it is called as
+    ``mcp_server_factory(team, agent)`` to produce the MCP server
+    instead of using the local ``create_agent_mcp_server``.  This is
+    used by satellites to inject HTTP-backed remote MCP tools.
     """
     if ad is None:
         ad = _agent_dir(hc_home, team, agent)
@@ -620,11 +626,12 @@ def _create_telephone(
     git_dirs = _repo_git_dirs(hc_home, team)
     add_dirs.extend(git_dirs)
 
-    # In-process MCP server — runs inside daemon, outside agent sandbox.
-    # Gives agents safe access to DB/config via tool calls instead of CLI.
-    from delegate.mcp_tools import create_agent_mcp_server
-
-    mcp_server = create_agent_mcp_server(hc_home, team, agent)
+    # MCP server — pluggable: local (default) or remote (satellite)
+    if mcp_server_factory is not None:
+        mcp_server = mcp_server_factory(team, agent)
+    else:
+        from delegate.mcp_tools import create_agent_mcp_server
+        mcp_server = create_agent_mcp_server(hc_home, team, agent)
     mcp_servers = {"delegate": mcp_server} if mcp_server is not None else None
 
     # Network allowlist — read from protected/network.yaml
@@ -714,6 +721,7 @@ async def run_turn(
     agent: str,
     *,
     exchange: TelephoneExchange,
+    mcp_server_factory: Any | None = None,
 ) -> TurnResult:
     """Run a single turn for an agent.
 
@@ -900,6 +908,7 @@ async def run_turn(
             role=role,
             model=model,
             ad=ad,
+            mcp_server_factory=mcp_server_factory,
         )
         exchange.put(team, agent, tel)
 

@@ -159,7 +159,7 @@ def _default_model(role: str) -> str:
 def _default_state(role: str, model: str | None = None) -> dict:
     if model is None:
         model = _default_model(role)
-    return {"role": role, "model": model, "pid": None, "token_budget": None}
+    return {"role": role, "model": model, "pid": None, "token_budget": None, "host": None}
 
 
 def make_roster(

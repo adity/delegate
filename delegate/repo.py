@@ -85,6 +85,23 @@ def _resolve_repo_dir(hc_home: Path, team: str, name: str) -> Path:
     return _repo_path(hc_home, team, name)
 
 
+def _detect_remote_url(repo_path: Path) -> str | None:
+    """Auto-detect the git remote URL (origin) for a local repo."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
 def register_repo(
     hc_home: Path,
     team: str,
@@ -92,6 +109,7 @@ def register_repo(
     name: str | None = None,
     approval: str | None = None,
     test_cmd: str | None = None,
+    remote_url: str | None = None,
 ) -> str:
     """Register a local repository for a team.
 
@@ -103,6 +121,7 @@ def register_repo(
         approval: Merge approval mode — 'auto' or 'manual'.
                   Defaults to 'manual' for new repos.
         test_cmd: Optional shell command to run tests.
+        remote_url: Git remote URL for satellite sync (auto-detected if not provided).
 
     Returns:
         The name used for the repo.
@@ -162,6 +181,17 @@ def register_repo(
 
         # Register in team config (new repo — default approval to 'manual')
         _config_add_repo(hc_home, team, name, str(source_path), approval=approval or "manual", test_cmd=test_cmd)
+
+    # Auto-detect remote_url if not explicitly provided
+    if remote_url is None:
+        remote_url = _detect_remote_url(source_path)
+    if remote_url:
+        from delegate.config import update_repo_remote_url
+        try:
+            update_repo_remote_url(hc_home, team, name, remote_url)
+            logger.info("Set remote_url for '%s': %s", name, remote_url)
+        except KeyError:
+            pass
 
     logger.info("Registered repo '%s' for team '%s' from %s", name, team, source_path)
     return name

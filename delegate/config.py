@@ -302,6 +302,7 @@ def add_repo(
     source: str,
     approval: str = "manual",
     test_cmd: str | None = None,
+    remote_url: str | None = None,
 ) -> None:
     """Register a repo for a team.
 
@@ -312,6 +313,7 @@ def add_repo(
         source: Local path or remote URL.
         approval: Merge approval mode — 'auto' or 'manual' (default: 'manual').
         test_cmd: Optional shell command to run tests.
+        remote_url: Git remote URL (e.g. GitHub) for satellite sync.
     """
     data = _read_repos(hc_home, team)
     existing = data.get(name, {})
@@ -319,6 +321,8 @@ def add_repo(
     existing["approval"] = approval
     if test_cmd is not None:
         existing["test_cmd"] = test_cmd
+    if remote_url is not None:
+        existing["remote_url"] = remote_url
     data[name] = existing
     _write_repos(hc_home, team, data)
 
@@ -357,6 +361,24 @@ def update_repo_test_cmd(hc_home: Path, team: str, name: str, test_cmd: str) -> 
     if name not in data:
         raise KeyError(f"Repo '{name}' not found in team '{team}' config")
     data[name]["test_cmd"] = test_cmd
+    _write_repos(hc_home, team, data)
+
+
+# --- Repo remote_url ---
+
+def get_repo_remote_url(hc_home: Path, team: str, repo_name: str) -> str | None:
+    """Return the configured remote URL for a repo, or None if not set."""
+    repos = get_repos(hc_home, team)
+    meta = repos.get(repo_name, {})
+    return meta.get("remote_url")
+
+
+def update_repo_remote_url(hc_home: Path, team: str, name: str, remote_url: str) -> None:
+    """Update the remote URL for an existing repo."""
+    data = _read_repos(hc_home, team)
+    if name not in data:
+        raise KeyError(f"Repo '{name}' not found in team '{team}' config")
+    data[name]["remote_url"] = remote_url
     _write_repos(hc_home, team, data)
 
 

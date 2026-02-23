@@ -240,6 +240,20 @@ def _agent_current_task(hc_home: Path, team: str, agent_name: str, ip_tasks: lis
     return None
 
 
+def _is_local_agent(hc_home: Path, team: str, agent: str) -> bool:
+    """Check if an agent runs locally (no host assigned, or host is None).
+
+    Agents with a non-None ``host`` field in state.yaml are satellite agents
+    and should be skipped by the coordinator's daemon loop.
+    """
+    ad = _agent_dir(hc_home, team, agent)
+    state_file = ad / "state.yaml"
+    if not state_file.exists():
+        return True  # unknown agent — treat as local
+    state = yaml.safe_load(state_file.read_text()) or {}
+    return state.get("host") is None
+
+
 def _list_team_agents(hc_home: Path, team: str) -> list[dict]:
     """List AI agents for a team (excludes human members)."""
     ad = _agents_dir(hc_home, team)
@@ -276,6 +290,7 @@ def _list_team_agents(hc_home: Path, team: str) -> list[dict]:
             "pid": True,  # All agents are always online — daemon dispatches turns
             "unread_inbox": unread,
             "team": team,
+            "host": state.get("host"),  # None = local, str = satellite name
             "last_active_at": _agent_last_active_at(d),
             "current_task": _agent_current_task(hc_home, team, d.name, ip_tasks),
         })
@@ -781,10 +796,11 @@ async def _daemon_loop(
                     )
 
                 # Find agents with unread messages and dispatch turns
+                # Skip agents assigned to satellites (host != None)
                 ai_agents = set(list_ai_agents(hc_home, team))
                 needing_turn = [
                     a for a in agents_with_unread(hc_home, team)
-                    if a in ai_agents
+                    if a in ai_agents and _is_local_agent(hc_home, team, a)
                 ]
                 for agent in needing_turn:
                     # Check shutdown flag before dispatching
@@ -3404,6 +3420,465 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             media_type = guessed_type or "application/octet-stream"
 
         return Response(content=file_bytes, media_type=media_type)
+
+    # ===================================================================
+    # /internal/* — Satellite API endpoints (bearer-token protected)
+    # ===================================================================
+
+    from fastapi import Request, Depends, Cookie
+    from fastapi.responses import RedirectResponse
+
+    async def _require_satellite_token(request: Request) -> str:
+        """Dependency: validate bearer token for /internal/* routes.
+
+        Returns the satellite name on success, raises 401 on failure.
+        """
+        from delegate.auth import validate_satellite_token
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        token = auth_header[7:]
+        satellite_name = validate_satellite_token(hc_home, token)
+        if satellite_name is None:
+            raise HTTPException(status_code=401, detail="Invalid bearer token")
+        return satellite_name
+
+    # --- Satellite polling ---
+
+    @app.get("/internal/satellite/poll")
+    def satellite_poll(satellite_id: str, _sat: str = Depends(_require_satellite_token)):
+        """Return agents with unread messages whose host matches this satellite."""
+        from delegate.mailbox import agents_with_unread
+        from delegate.runtime import list_ai_agents
+
+        result = []
+        for team in _list_teams(hc_home):
+            ai_agents = set(list_ai_agents(hc_home, team))
+            for agent_name in agents_with_unread(hc_home, team):
+                if agent_name not in ai_agents:
+                    continue
+                # Check if this agent is assigned to this satellite
+                ad = _agent_dir(hc_home, team, agent_name)
+                state_file = ad / "state.yaml"
+                if not state_file.exists():
+                    continue
+                state = yaml.safe_load(state_file.read_text()) or {}
+                if state.get("host") == satellite_id:
+                    result.append({
+                        "team": team,
+                        "agent": agent_name,
+                        "role": state.get("role", "engineer"),
+                        "model": state.get("model", "sonnet"),
+                    })
+        return {"agents": result}
+
+    # --- Mailbox proxies ---
+
+    class MailboxSendBody(BaseModel):
+        team: str
+        sender: str
+        recipient: str
+        message: str
+        task_id: int | None = None
+
+    @app.post("/internal/mailbox/send")
+    def internal_mailbox_send(body: MailboxSendBody, _sat: str = Depends(_require_satellite_token)):
+        msg_id = _send(hc_home, body.team, body.sender, body.recipient, body.message, task_id=body.task_id)
+        return {"id": msg_id}
+
+    class MailboxClaimBody(BaseModel):
+        team: str
+        agent: str
+        limit: int = 50
+
+    @app.post("/internal/mailbox/claim")
+    def internal_mailbox_claim(body: MailboxClaimBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.mailbox import claim_inbox_batch
+        messages = claim_inbox_batch(hc_home, body.team, body.agent, limit=body.limit)
+        return {"messages": [
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "recipient": m.recipient,
+                "body": m.body,
+                "task_id": m.task_id,
+                "time": m.time,
+                "delivered_at": m.delivered_at,
+                "seen_at": m.seen_at,
+                "processed_at": m.processed_at,
+            }
+            for m in messages
+        ]}
+
+    class MailboxMarkProcessedBody(BaseModel):
+        team: str
+        message_ids: list[int]
+
+    @app.post("/internal/mailbox/mark-processed")
+    def internal_mailbox_mark_processed(body: MailboxMarkProcessedBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.mailbox import mark_processed_batch
+        mark_processed_batch(hc_home, body.team, body.message_ids)
+        return {"ok": True}
+
+    @app.get("/internal/mailbox/inbox")
+    def internal_mailbox_inbox(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
+        messages = _read_inbox(hc_home, team, agent, unread_only=True)
+        return {"messages": [
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "body": m.body,
+                "task_id": m.task_id,
+                "time": m.time,
+            }
+            for m in messages
+        ]}
+
+    # --- Task proxies ---
+
+    class TaskCreateBody(BaseModel):
+        team: str
+        title: str
+        assignee: str
+        description: str = ""
+        priority: str = "medium"
+        repo: str = ""
+        depends_on: list[int] | None = None
+
+    @app.post("/internal/task/create")
+    def internal_task_create(body: TaskCreateBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.task import create_task
+        task = create_task(
+            hc_home, body.team,
+            title=body.title,
+            assignee=body.assignee,
+            description=body.description,
+            priority=body.priority,
+            repo=body.repo,
+            depends_on=body.depends_on,
+        )
+        return task
+
+    @app.get("/internal/task/list")
+    def internal_task_list(team: str, status: str | None = None, assignee: str | None = None, _sat: str = Depends(_require_satellite_token)):
+        kwargs = {}
+        if status:
+            kwargs["status"] = status
+        if assignee:
+            kwargs["assignee"] = assignee
+        return _list_tasks(hc_home, team, **kwargs)
+
+    @app.get("/internal/task/show")
+    def internal_task_show(team: str, task_id: int, _sat: str = Depends(_require_satellite_token)):
+        return _get_task(hc_home, team, task_id)
+
+    class TaskStatusBody(BaseModel):
+        team: str
+        task_id: int
+        new_status: str
+
+    @app.post("/internal/task/status")
+    def internal_task_status(body: TaskStatusBody, _sat: str = Depends(_require_satellite_token)):
+        _change_status(hc_home, body.team, body.task_id, body.new_status)
+        return {"ok": True}
+
+    class TaskAssignBody(BaseModel):
+        team: str
+        task_id: int
+        assignee: str
+
+    @app.post("/internal/task/assign")
+    def internal_task_assign(body: TaskAssignBody, _sat: str = Depends(_require_satellite_token)):
+        _update_task(hc_home, body.team, body.task_id, assignee=body.assignee)
+        return {"ok": True}
+
+    class TaskCommentInternalBody(BaseModel):
+        team: str
+        task_id: int
+        author: str
+        body: str
+
+    @app.post("/internal/task/comment")
+    def internal_task_comment(body: TaskCommentInternalBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.task import add_comment
+        cid = add_comment(hc_home, body.team, body.task_id, body.author, body.body)
+        return {"id": cid}
+
+    class TaskCancelBody(BaseModel):
+        team: str
+        task_id: int
+
+    @app.post("/internal/task/cancel")
+    def internal_task_cancel(body: TaskCancelBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.task import cancel_task
+        return cancel_task(hc_home, body.team, body.task_id)
+
+    class TaskAttachBody(BaseModel):
+        team: str
+        task_id: int
+        file_path: str
+
+    @app.post("/internal/task/attach")
+    def internal_task_attach(body: TaskAttachBody, _sat: str = Depends(_require_satellite_token)):
+        task = _get_task(hc_home, body.team, body.task_id)
+        attachments = list(task.get("attachments", []))
+        if body.file_path not in attachments:
+            attachments.append(body.file_path)
+        _update_task(hc_home, body.team, body.task_id, attachments=attachments)
+        return {"ok": True}
+
+    class TaskDetachBody(BaseModel):
+        team: str
+        task_id: int
+        file_path: str
+
+    @app.post("/internal/task/detach")
+    def internal_task_detach(body: TaskDetachBody, _sat: str = Depends(_require_satellite_token)):
+        task = _get_task(hc_home, body.team, body.task_id)
+        attachments = list(task.get("attachments", []))
+        if body.file_path in attachments:
+            attachments.remove(body.file_path)
+        _update_task(hc_home, body.team, body.task_id, attachments=attachments)
+        return {"ok": True}
+
+    # --- Repo proxy ---
+
+    @app.get("/internal/repo/list")
+    def internal_repo_list(team: str, _sat: str = Depends(_require_satellite_token)):
+        from delegate.config import get_repos
+        repos = get_repos(hc_home, team)
+        result = []
+        for name, meta in repos.items():
+            result.append({
+                "name": name,
+                "source": meta.get("source", ""),
+                "remote_url": meta.get("remote_url", ""),
+                "approval": meta.get("approval", "manual"),
+            })
+        return {"repos": result}
+
+    # --- Session & activity proxies ---
+
+    class SessionStartBody(BaseModel):
+        team: str
+        agent: str
+        task_id: int | None = None
+
+    @app.post("/internal/session/start")
+    def internal_session_start(body: SessionStartBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.chat import start_session
+        session_id = start_session(hc_home, body.team, body.agent, task_id=body.task_id)
+        return {"session_id": session_id}
+
+    class SessionEndBody(BaseModel):
+        team: str
+        session_id: int
+        tokens_in: int = 0
+        tokens_out: int = 0
+        cost_usd: float = 0.0
+        cache_read_tokens: int = 0
+        cache_write_tokens: int = 0
+
+    @app.post("/internal/session/end")
+    def internal_session_end(body: SessionEndBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.chat import end_session
+        end_session(
+            hc_home, body.team, body.session_id,
+            tokens_in=body.tokens_in,
+            tokens_out=body.tokens_out,
+            cost_usd=body.cost_usd,
+            cache_read_tokens=body.cache_read_tokens,
+            cache_write_tokens=body.cache_write_tokens,
+        )
+        return {"ok": True}
+
+    class ActivityBroadcastBody(BaseModel):
+        agent: str
+        team: str
+        tool: str
+        detail: str
+        task_id: int | None = None
+
+    @app.post("/internal/activity/broadcast")
+    def internal_activity_broadcast(body: ActivityBroadcastBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.activity import broadcast as _broadcast
+        _broadcast(body.agent, body.team, body.tool, body.detail, task_id=body.task_id)
+        return {"ok": True}
+
+    class TurnEventBody(BaseModel):
+        event_type: str
+        agent: str
+        team: str = ""
+        task_id: int | None = None
+        sender: str = ""
+
+    @app.post("/internal/activity/turn-event")
+    def internal_turn_event(body: TurnEventBody, _sat: str = Depends(_require_satellite_token)):
+        from delegate.activity import broadcast_turn_event as _bte
+        _bte(body.event_type, body.agent, team=body.team, task_id=body.task_id, sender=body.sender)
+        return {"ok": True}
+
+    # --- Agent config proxy ---
+
+    @app.get("/internal/agent/config")
+    def internal_agent_config(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
+        """Return agent config needed by satellite to build prompts."""
+        ad = _agent_dir(hc_home, team, agent)
+        state_file = ad / "state.yaml"
+        if not state_file.exists():
+            raise HTTPException(status_code=404, detail=f"Agent '{agent}' not found")
+
+        state = yaml.safe_load(state_file.read_text()) or {}
+
+        # Read bio
+        bio_file = ad / "bio.md"
+        bio = bio_file.read_text() if bio_file.exists() else ""
+
+        # Read context.md
+        context_file = ad / "context.md"
+        context = context_file.read_text() if context_file.exists() else ""
+
+        # Read preamble from prompt.py
+        from delegate.prompt import build_preamble
+        preamble = build_preamble(hc_home, team, agent)
+
+        return {
+            "role": state.get("role", "engineer"),
+            "model": state.get("model", "sonnet"),
+            "token_budget": state.get("token_budget"),
+            "bio": bio,
+            "context": context,
+            "preamble": preamble,
+        }
+
+    class WriteContextBody(BaseModel):
+        team: str
+        agent: str
+        content: str
+
+    @app.post("/internal/agent/write-context")
+    def internal_agent_write_context(body: WriteContextBody, _sat: str = Depends(_require_satellite_token)):
+        ad = _agent_dir(hc_home, body.team, body.agent)
+        (ad / "context.md").write_text(body.content)
+        return {"ok": True}
+
+    class WriteWorklogBody(BaseModel):
+        team: str
+        agent: str
+        session_id: int
+        content: str
+
+    @app.post("/internal/agent/write-worklog")
+    def internal_agent_write_worklog(body: WriteWorklogBody, _sat: str = Depends(_require_satellite_token)):
+        ad = _agent_dir(hc_home, body.team, body.agent)
+        logs_dir = ad / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        worklog_path = logs_dir / f"{body.session_id}.worklog.md"
+        worklog_path.write_text(body.content)
+        return {"ok": True}
+
+    # ===================================================================
+    # Web UI passphrase authentication middleware
+    # ===================================================================
+
+    @app.middleware("http")
+    async def _passphrase_auth_middleware(request: Request, call_next):
+        """Require session cookie for web UI routes when passphrase is set.
+
+        Exempted paths:
+        - /internal/* (uses bearer token auth)
+        - /login (login page and form submission)
+        - /static/* (CSS/JS assets)
+        - /manifest.json, /sw.js (PWA files)
+        """
+        from delegate.auth import is_passphrase_enabled, validate_session_cookie
+
+        path = request.url.path
+        # Skip auth for internal API, login, and static routes
+        if (
+            path.startswith("/internal/")
+            or path == "/login"
+            or path.startswith("/static/")
+            or path == "/manifest.json"
+            or path == "/sw.js"
+        ):
+            return await call_next(request)
+
+        if not is_passphrase_enabled(hc_home):
+            return await call_next(request)
+
+        # Check session cookie
+        cookie = request.cookies.get("delegate_session")
+        if cookie and validate_session_cookie(hc_home, cookie):
+            return await call_next(request)
+
+        # Redirect to login for HTML requests, return 401 for API
+        if path.startswith("/api/") or path.startswith("/teams/"):
+            # Check if it's an API call (Accept: application/json)
+            accept = request.headers.get("accept", "")
+            if "application/json" in accept or "text/html" not in accept:
+                raise HTTPException(status_code=401, detail="Authentication required")
+
+        return RedirectResponse(url="/login", status_code=302)
+
+    # --- Login page ---
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page():
+        from delegate.auth import is_passphrase_enabled
+        if not is_passphrase_enabled(hc_home):
+            return RedirectResponse(url="/", status_code=302)
+        return """<!DOCTYPE html>
+<html><head><title>Delegate Login</title>
+<style>
+body{background:#1e1e1e;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+form{background:#2d2d2d;padding:2rem;border-radius:8px;min-width:300px}
+h2{margin-top:0;color:#f0f0f0}
+input{width:100%;padding:0.5rem;margin:0.5rem 0;box-sizing:border-box;background:#3d3d3d;border:1px solid #555;color:#e0e0e0;border-radius:4px}
+button{width:100%;padding:0.5rem;margin-top:0.5rem;background:#4a9eff;color:white;border:none;border-radius:4px;cursor:pointer}
+button:hover{background:#3a8eef}
+.error{color:#ff6b6b;font-size:0.9em}
+</style></head>
+<body><form method="post" action="/login">
+<h2>Delegate</h2>
+<input type="password" name="passphrase" placeholder="Passphrase" autofocus>
+<button type="submit">Login</button>
+</form></body></html>"""
+
+    @app.post("/login")
+    async def login_submit(request: Request):
+        from delegate.auth import verify_passphrase, create_session_cookie
+        form = await request.form()
+        passphrase = form.get("passphrase", "")
+        if verify_passphrase(hc_home, passphrase):
+            cookie = create_session_cookie(hc_home)
+            response = RedirectResponse(url="/", status_code=302)
+            response.set_cookie(
+                key="delegate_session",
+                value=cookie,
+                httponly=True,
+                samesite="lax",
+                max_age=7 * 24 * 3600,
+            )
+            return response
+        return HTMLResponse("""<!DOCTYPE html>
+<html><head><title>Delegate Login</title>
+<style>
+body{background:#1e1e1e;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+form{background:#2d2d2d;padding:2rem;border-radius:8px;min-width:300px}
+h2{margin-top:0;color:#f0f0f0}
+input{width:100%;padding:0.5rem;margin:0.5rem 0;box-sizing:border-box;background:#3d3d3d;border:1px solid #555;color:#e0e0e0;border-radius:4px}
+button{width:100%;padding:0.5rem;margin-top:0.5rem;background:#4a9eff;color:white;border:none;border-radius:4px;cursor:pointer}
+button:hover{background:#3a8eef}
+.error{color:#ff6b6b;font-size:0.9em}
+</style></head>
+<body><form method="post" action="/login">
+<h2>Delegate</h2>
+<p class="error">Invalid passphrase</p>
+<input type="password" name="passphrase" placeholder="Passphrase" autofocus>
+<button type="submit">Login</button>
+</form></body></html>""", status_code=401)
 
     # --- Static files ---
     _static_dir = Path(__file__).parent / "static"
