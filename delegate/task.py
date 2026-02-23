@@ -248,6 +248,30 @@ def _all_deps_resolved(hc_home: Path, team: str, task: dict) -> bool:
     return True
 
 
+def increment_merge_attempts(hc_home: Path, team: str, task_id: int) -> int:
+    """Atomically increment merge_attempts in SQL and return the new value.
+
+    Uses ``SET merge_attempts = merge_attempts + 1`` to avoid the
+    read-modify-write race that occurs when incrementing in Python.
+    """
+    team_uuid = _team(hc_home, team)
+    conn = get_connection(hc_home, team)
+    try:
+        conn.execute(
+            "UPDATE tasks SET merge_attempts = COALESCE(merge_attempts, 0) + 1, "
+            "updated_at = ? WHERE project_uuid = ? AND id = ?",
+            (_now(), team_uuid, task_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT merge_attempts FROM tasks WHERE project_uuid = ? AND id = ?",
+            (team_uuid, task_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else 1
+
+
 def update_task(hc_home: Path, team: str, task_id: int, **updates) -> dict:
     """Update fields on an existing task. Returns the updated task."""
     # Validate field names
@@ -472,6 +496,62 @@ def _validate_review_gate(hc_home: Path, team: str, task: dict) -> None:
                 pass
 
 
+def _atomic_status_update(
+    hc_home: Path, team: str, task_id: int,
+    expected_status: str, updates: dict,
+) -> dict:
+    """Update a task only if its current status matches *expected_status*.
+
+    Uses an atomic ``UPDATE ... WHERE status = ?`` to implement optimistic
+    locking.  If another caller changed the status between our read and
+    this write, zero rows are affected and we raise ``ValueError``.
+
+    Returns the updated task dict.
+    """
+    import json as _json
+
+    updates["updated_at"] = _now()
+    set_parts = []
+    params: list = []
+    for key, value in updates.items():
+        set_parts.append(f"{key} = ?")
+        if key in _JSON_COLUMNS:
+            params.append(_json.dumps(value) if isinstance(value, (dict, list)) else (value or "{}"))
+        else:
+            params.append(value)
+    team_uuid = _team(hc_home, team)
+    params.extend([team_uuid, task_id, expected_status])
+
+    conn = get_connection(hc_home, team)
+    try:
+        cursor = conn.execute(
+            f"UPDATE tasks SET {', '.join(set_parts)} "
+            f"WHERE project_uuid = ? AND id = ? AND status = ?",
+            params,
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            # Re-read to get the actual current status for the error message
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE project_uuid = ? AND id = ?",
+                (team_uuid, task_id),
+            ).fetchone()
+            actual = row["status"] if row else "unknown"
+            raise ValueError(
+                f"Concurrent status change on {format_task_id(task_id)}: "
+                f"expected '{expected_status}' but found '{actual}'. "
+                f"Another caller already transitioned this task."
+            )
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE project_uuid = ? AND id = ?",
+            (team_uuid, task_id),
+        ).fetchone()
+        task = task_row_to_dict(row)
+    finally:
+        conn.close()
+    return task
+
+
 def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_log: bool = False) -> dict:
     """Change task status with workflow-driven validation and hooks.
 
@@ -564,7 +644,11 @@ def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_
             updates["review_attempt"] = new_attempt
             updates["approval_status"] = ""
 
-    task = update_task(hc_home, team, task_id, **updates)
+    # Optimistic locking: only update if status is still what we read.
+    # This prevents two concurrent callers from both transitioning the
+    # same task (e.g. both reading "in_progress" and both writing
+    # "in_review"), which would run hooks twice and corrupt state.
+    task = _atomic_status_update(hc_home, team, task_id, current, updates)
 
     # Legacy: create review row after task is updated
     if not wf_def and status == "in_approval":

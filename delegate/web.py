@@ -673,6 +673,7 @@ async def _daemon_loop(
     sem = asyncio.Semaphore(max_concurrent)
     merge_sem = asyncio.Semaphore(1)
     in_flight: set[tuple[str, str]] = set()  # (team, agent) pairs currently running
+    in_flight_lock = asyncio.Lock()  # guards check-then-add on in_flight
 
     # In-memory cache: (team, task_id) pairs whose worktrees are confirmed.
     # Cleared when tasks transition to done/cancelled.
@@ -791,11 +792,13 @@ async def _daemon_loop(
                         break
 
                     key = (team, agent)
-                    if key not in in_flight:
+                    async with in_flight_lock:
+                        if key in in_flight:
+                            continue
                         in_flight.add(key)
-                        agent_task = asyncio.create_task(_dispatch_turn(team, agent))
-                        _active_agent_tasks.add(agent_task)
-                        agent_task.add_done_callback(_active_agent_tasks.discard)
+                    agent_task = asyncio.create_task(_dispatch_turn(team, agent))
+                    _active_agent_tasks.add(agent_task)
+                    agent_task.add_done_callback(_active_agent_tasks.discard)
 
                 # Process auto stages (merge, etc.) — serialized, one at a time
                 if not _shutdown_flag:

@@ -66,6 +66,7 @@ from delegate.review import get_current_review
 from delegate.task import (
     get_task, change_status, update_task, list_tasks,
     format_task_id, transition_task, assign_task,
+    increment_merge_attempts,
 )
 from delegate.chat import log_event
 from delegate.paths import team_dir as _team_dir
@@ -979,9 +980,10 @@ def _handle_merge_failure(
     manager = _get_manager_name(hc_home, team)
 
     if reason.retryable:
-        current_attempts = task.get("merge_attempts", 0) + 1
+        # Atomically increment merge_attempts in SQL to avoid lost-update
+        # race when two merge workers process the same task concurrently.
+        current_attempts = increment_merge_attempts(hc_home, team, task_id)
         task_updates: dict = dict(
-            merge_attempts=current_attempts,
             status_detail=detail,
         )
 

@@ -53,6 +53,7 @@ from delegate.agent import (
 )
 from delegate.mailbox import (
     read_inbox,
+    claim_inbox_batch,
     mark_seen_batch,
     mark_processed_batch,
     Message,
@@ -766,10 +767,13 @@ async def run_turn(
     token_budget = state.get("token_budget")
     max_turns = max(1, token_budget // 4000) if token_budget else None
 
-    # --- Message selection: pick ≤5 with same task_id (human first) ---
+    # --- Message selection: atomically claim ≤5 with same task_id (human first) ---
+    # claim_inbox_batch atomically reads AND marks messages as seen in one
+    # transaction, preventing two concurrent turns from processing the same
+    # messages.  We read a generous limit and then narrow to the batch.
     from delegate.config import get_default_human
-    inbox = read_inbox(hc_home, team, agent, unread_only=True)
-    batch = _select_batch(inbox, human_name=get_default_human(hc_home))
+    claimed = claim_inbox_batch(hc_home, team, agent, limit=50)
+    batch = _select_batch(claimed, human_name=get_default_human(hc_home))
 
     if not batch:
         log_caller.reset(_prev_caller)
@@ -786,6 +790,7 @@ async def run_turn(
             logger.debug("Could not resolve task %s", current_task_id)
 
     # --- Skip cancelled/done tasks: mark messages processed and return ---
+    # Messages are already marked seen by claim_inbox_batch above.
     if current_task and current_task.get("status") in ("cancelled", "done"):
         logger.info(
             "Task %s is %s — discarding %d message(s) for %s",
@@ -795,7 +800,6 @@ async def run_turn(
         msg_ids = [m.id for m in batch if m.id is not None]
         if msg_ids:
             ts_now = datetime.now(timezone.utc).isoformat()
-            mark_seen_batch(hc_home, team, msg_ids)
             mark_processed_batch(hc_home, team, msg_ids)
             broadcast_msg_status(team, msg_ids, "seen_at", ts_now)
             broadcast_msg_status(team, msg_ids, "processed_at", ts_now)
@@ -807,11 +811,11 @@ async def run_turn(
         hc_home, team, agent, current_task,
     )
 
-    # --- Mark selected messages as seen ---
+    # Messages were already atomically marked seen by claim_inbox_batch.
+    # Broadcast the seen status to SSE subscribers.
     seen_ids = [m.id for m in batch if m.id is not None]
     if seen_ids:
         seen_ts = datetime.now(timezone.utc).isoformat()
-        mark_seen_batch(hc_home, team, seen_ids)
         broadcast_msg_status(team, seen_ids, "seen_at", seen_ts)
 
     for inbox_msg in batch:

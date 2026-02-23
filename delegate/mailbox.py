@@ -185,6 +185,45 @@ def read_outbox(
     return [_row_to_message(r) for r in rows]
 
 
+def claim_inbox_batch(
+    hc_home: Path, team: str, agent: str, limit: int = 5,
+) -> list[Message]:
+    """Atomically read unprocessed messages and mark them as seen.
+
+    Uses a single transaction with ``BEGIN IMMEDIATE`` to prevent two
+    concurrent callers (e.g. two turns dispatched for the same agent)
+    from both reading and claiming the same messages.
+
+    Only messages that are delivered but not yet seen are claimed.
+    Returns the claimed messages (now marked ``seen_at``).
+    """
+    team_uuid = _team(hc_home, team)
+    now = _now()
+    conn = get_connection(hc_home, team)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE type = 'chat' AND project_uuid = ? "
+            "AND recipient = ? AND delivered_at IS NOT NULL AND processed_at IS NULL "
+            "AND seen_at IS NULL "
+            "ORDER BY id ASC LIMIT ?",
+            (team_uuid, agent, limit),
+        ).fetchall()
+        if rows:
+            ids = [r["id"] for r in rows]
+            conn.executemany(
+                "UPDATE messages SET seen_at = ? WHERE id = ?",
+                [(now, mid) for mid in ids],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return [_row_to_message(r) for r in rows]
+
+
 def mark_seen(hc_home: Path, team: str, msg_id: int) -> None:
     """Mark a message as seen (agent control loop picked it up at turn start)."""
     conn = get_connection(hc_home, team)
