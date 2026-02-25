@@ -182,6 +182,15 @@ def _load_team_map(hc_home: Path) -> dict[str, str]:
     return data
 
 
+def _reload_team_map(hc_home: Path) -> dict[str, str]:
+    """Force-reload team map from disk, bypassing cache."""
+    mp = _team_map_path(hc_home)
+    data = json.loads(mp.read_text()) if mp.exists() else {}
+    with _team_map_lock:
+        _team_map_cache[str(hc_home)] = data
+    return data
+
+
 def _save_team_map(hc_home: Path, data: dict[str, str]) -> None:
     """Persist the team name → UUID mapping."""
     mp = _team_map_path(hc_home)
@@ -216,6 +225,10 @@ def resolve_team_uuid(hc_home: Path, team_name: str) -> str:
     team name unchanged (fallback for tests and pre-UUID data).
     """
     data = _load_team_map(hc_home)
+    if team_name in data:
+        return data[team_name]
+    # Cache miss — reload from disk in case an external process updated the file
+    data = _reload_team_map(hc_home)
     return data.get(team_name, team_name)
 
 

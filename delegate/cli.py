@@ -462,12 +462,26 @@ def team_remove(ctx: click.Context, name: str, yes: bool) -> None:
             abort=True,
         )
 
+    # Resolve team UUID before we delete the directory (needed for soft_delete_team)
+    team_uuid: str | None = None
+    try:
+        from delegate.db import get_connection
+        conn = get_connection(hc_home)
+        row = conn.execute(
+            "SELECT project_id FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        if row:
+            team_uuid = row["project_id"]
+        conn.close()
+    except Exception:
+        pass
+
     shutil.rmtree(td)
 
     # Remove from global teams database table
     try:
         from delegate.db import get_connection
-        conn = get_connection(hc_home, "")
+        conn = get_connection(hc_home)
         try:
             conn.execute("DELETE FROM projects WHERE name = ?", (name,))
             conn.commit()
@@ -475,6 +489,34 @@ def team_remove(ctx: click.Context, name: str, yes: bool) -> None:
             conn.close()
     except Exception:
         pass  # Best-effort — directory is already gone
+
+    # Soft-delete team UUID + member IDs in db_ids
+    if team_uuid:
+        try:
+            from delegate.db import get_connection
+            from delegate.db_ids import soft_delete_team
+            ids_conn = get_connection(hc_home)
+            try:
+                soft_delete_team(ids_conn, team_uuid)
+                ids_conn.commit()
+            finally:
+                ids_conn.close()
+        except Exception:
+            pass  # Best-effort
+
+    # Remove from project_map.json
+    try:
+        from delegate.paths import unregister_team_path
+        unregister_team_path(hc_home, name)
+    except Exception:
+        pass  # Best-effort
+
+    # Notify all SSE clients to refresh their team list
+    try:
+        from delegate.activity import broadcast_teams_refresh
+        broadcast_teams_refresh()
+    except Exception:
+        pass  # Best-effort — no-op if no SSE clients connected
 
     success(f"Removed team '{name}'")
 
