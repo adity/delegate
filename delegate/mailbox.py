@@ -439,6 +439,45 @@ def agents_with_unread(hc_home: Path, team: str) -> list[str]:
     return [row[0] for row in rows]
 
 
+def agents_with_unread_prioritized(
+    hc_home: Path, team: str, human_names: list[str],
+) -> list[str]:
+    """Return agents with unread messages, human-message recipients first.
+
+    Like ``agents_with_unread`` but sorts so agents that have a pending
+    message from a human sender are dispatched before the rest.
+    """
+    team_uuid = _team(hc_home, team)
+    conn = get_connection(hc_home, team)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT recipient FROM messages "
+            "WHERE type = 'chat' AND project_uuid = ? "
+            "AND delivered_at IS NOT NULL AND processed_at IS NULL",
+            (team_uuid,),
+        ).fetchall()
+        all_agents = [row[0] for row in rows]
+
+        if not human_names or not all_agents:
+            return all_agents
+
+        placeholders = ",".join("?" * len(human_names))
+        human_rows = conn.execute(
+            f"SELECT DISTINCT recipient FROM messages "
+            f"WHERE type = 'chat' AND project_uuid = ? "
+            f"AND delivered_at IS NOT NULL AND processed_at IS NULL "
+            f"AND sender IN ({placeholders})",
+            (team_uuid, *human_names),
+        ).fetchall()
+        human_recipients = {row[0] for row in human_rows}
+    finally:
+        conn.close()
+
+    priority = [a for a in all_agents if a in human_recipients]
+    rest = [a for a in all_agents if a not in human_recipients]
+    return priority + rest
+
+
 def count_unread(hc_home: Path, team: str, agent: str) -> int:
     """Count unread delivered messages for an agent."""
     team_uuid = _team(hc_home, team)
