@@ -218,14 +218,26 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     )
     async def task_assign(args: dict) -> dict:
         try:
-            from delegate.task import update_task
+            from delegate.task import update_task, get_task
+            from delegate.mailbox import send as send_message
 
-            update_task(
-                hc_home, team, args["task_id"],
-                assignee=args["assignee"],
-            )
+            task_id = args["task_id"]
+            assignee = args["assignee"]
+
+            update_task(hc_home, team, task_id, assignee=assignee)
+
+            # Auto-notify: send mailbox message so the assignee gets a turn
+            if assignee != agent:
+                task = get_task(hc_home, team, task_id)
+                title = task.get("title", f"T{task_id:04d}")
+                send_message(
+                    hc_home, team, agent, assignee,
+                    f"Task T{task_id:04d} ({title}) has been assigned to you. Please review and begin work.",
+                    task_id=task_id,
+                )
+
             return _text_result(
-                f"Task T{args['task_id']:04d} assigned to {args['assignee']}"
+                f"Task T{task_id:04d} assigned to {assignee}"
             )
         except Exception as e:
             logger.exception("task_assign failed")

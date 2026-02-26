@@ -678,19 +678,30 @@ async def _daemon_loop(
     are reused across turns (the normal production path).  When ``None``,
     each turn falls back to a one-shot ``sdk_query()`` call.
     """
+    import time as _time
+
     from delegate.runtime import run_turn, list_ai_agents
     from delegate.merge import merge_once
     from delegate.bootstrap import get_member_by_role
-    from delegate.mailbox import send as send_message, agents_with_unread
-    from delegate.task import format_task_id
+    from delegate.mailbox import send as send_message, agents_with_unread, agents_with_unread_prioritized
+    from delegate.config import get_human_members
+    from delegate.task import format_task_id, list_tasks as _list_tasks_fn
+    from delegate.config import SYSTEM_USER
     from delegate.activity import broadcast_turn_event
 
     logger.info("Daemon loop started — polling every %.1fs", interval)
+
+    human_names = [m["name"] for m in get_human_members(hc_home)]
 
     sem = asyncio.Semaphore(max_concurrent)
     merge_sem = asyncio.Semaphore(1)
     in_flight: set[tuple[str, str]] = set()  # (team, agent) pairs currently running
     in_flight_lock = asyncio.Lock()  # guards check-then-add on in_flight
+
+    # Stall detector state
+    last_stall_check: float = 0.0
+    recently_nudged: set[tuple[str, str, int]] = set()  # (team, agent, task_id)
+    last_nudge_clear: float = 0.0
 
     # In-memory cache: (team, task_id) pairs whose worktrees are confirmed.
     # Cleared when tasks transition to done/cancelled.
@@ -802,7 +813,7 @@ async def _daemon_loop(
                 # Skip agents assigned to satellites (host != None)
                 ai_agents = set(list_ai_agents(hc_home, team))
                 needing_turn = [
-                    a for a in agents_with_unread(hc_home, team)
+                    a for a in agents_with_unread_prioritized(hc_home, team, human_names)
                     if a in ai_agents and _is_local_agent(hc_home, team, a)
                 ]
                 for agent in needing_turn:
@@ -850,6 +861,52 @@ async def _daemon_loop(
                     merge_task = asyncio.create_task(_run_auto_stages(team))
                     _active_merge_tasks.add(merge_task)
                     merge_task.add_done_callback(_active_merge_tasks.discard)
+
+            # --- Stall detector: nudge agents with assigned tasks but no activity ---
+            now = _time.monotonic()
+            if now - last_stall_check > 60:
+                last_stall_check = now
+                # Clear recently-nudged set every 5 minutes to allow re-nudging
+                if now - last_nudge_clear > 300:
+                    recently_nudged.clear()
+                    last_nudge_clear = now
+                for team in teams:
+                    try:
+                        all_tasks = _list_tasks_fn(hc_home, team)
+                        active_assigned = [
+                            t for t in all_tasks
+                            if t.get("assignee")
+                            and t.get("status") in ("todo", "in_progress")
+                        ]
+                        if not active_assigned:
+                            continue
+                        unread_agents = set(agents_with_unread(hc_home, team))
+                        ai_agents = set(list_ai_agents(hc_home, team))
+                        for t in active_assigned:
+                            assignee = t["assignee"]
+                            tid = t["id"]
+                            key = (team, assignee, tid)
+                            if assignee not in ai_agents:
+                                continue
+                            if assignee in unread_agents:
+                                continue
+                            async with in_flight_lock:
+                                if (team, assignee) in in_flight:
+                                    continue
+                            if key in recently_nudged:
+                                continue
+                            title = t.get("title", f"T{tid:04d}")
+                            status = t.get("status", "unknown")
+                            send_message(
+                                hc_home, team, SYSTEM_USER, assignee,
+                                f"You are assigned to T{tid:04d} ({title}) which is {status}. "
+                                f"Please check the task and continue working on it, or report any blockers.",
+                                task_id=tid,
+                            )
+                            recently_nudged.add(key)
+                            logger.info("Stall detector nudged %s for T%04d in %s", assignee, tid, team)
+                    except Exception:
+                        logger.exception("Stall detector error for team %s", team)
         except asyncio.CancelledError:
             logger.info("Daemon loop cancelled")
             raise
@@ -3194,6 +3251,51 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         if was_running:
             return {"status": "interrupted", "agent": agent, "team": resolved_team}
         return {"status": "not_running", "agent": agent, "team": resolved_team}
+
+    @app.post("/api/agents/{agent}/nudge")
+    async def nudge_agent(agent: str, team: str | None = None):
+        """Send a system nudge message to an agent to check its assigned tasks.
+
+        If the agent has active assigned tasks, the nudge lists them.
+        The daemon loop will dispatch a turn on the next cycle.
+        """
+        from delegate.config import SYSTEM_USER
+        from delegate.mailbox import send as send_message
+        from delegate.task import list_tasks
+
+        # Resolve team
+        teams = [team] if team else _list_teams(hc_home)
+        resolved_team = None
+        for t in teams:
+            ad = _agent_dir(hc_home, t, agent)
+            if ad.is_dir():
+                resolved_team = t
+                break
+
+        if resolved_team is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent}' not found")
+
+        active_tasks = [
+            t for t in list_tasks(hc_home, resolved_team, assignee=agent)
+            if t.get("status") not in ("done", "cancelled")
+        ]
+
+        if active_tasks:
+            task_lines = ", ".join(
+                f"T{t['id']:04d} ({t.get('title', 'untitled')}, status: {t.get('status', '?')})"
+                for t in active_tasks
+            )
+            body = f"Nudge: you have assigned tasks that need attention: {task_lines}. Please review and continue working."
+        else:
+            body = "Nudge: please check if there are any tasks or messages that need your attention."
+
+        send_message(hc_home, resolved_team, SYSTEM_USER, agent, body)
+        return {
+            "status": "nudged",
+            "agent": agent,
+            "team": resolved_team,
+            "active_tasks": len(active_tasks),
+        }
 
     @app.get("/teams/{team}/activity/stream")
     async def activity_stream(team: str):

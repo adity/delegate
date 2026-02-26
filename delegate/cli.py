@@ -1216,6 +1216,51 @@ def agent_set_host(ctx: click.Context, team: str, name: str, host: str | None, l
 
 
 # ──────────────────────────────────────────────────────────────
+# delegate agent nudge
+# ──────────────────────────────────────────────────────────────
+
+@agent.command("nudge")
+@click.argument("team")
+@click.argument("name")
+@click.option("--message", default=None, help="Custom nudge message to send.")
+@click.pass_context
+def agent_nudge(ctx: click.Context, team: str, name: str, message: str | None) -> None:
+    """Nudge an agent to check its assigned tasks and start working.
+
+    TEAM is the team name. NAME is the agent name.
+    Sends a system message to the agent's mailbox listing its pending tasks.
+    """
+    from delegate.config import SYSTEM_USER
+    from delegate.fmt import success, info
+    from delegate.mailbox import send as send_message
+    from delegate.task import list_tasks
+
+    hc_home = _get_home(ctx)
+
+    # Gather the agent's active tasks
+    active_tasks = [
+        t for t in list_tasks(hc_home, team, assignee=name)
+        if t.get("status") not in ("done", "cancelled")
+    ]
+
+    if message:
+        body = message
+    elif active_tasks:
+        task_lines = ", ".join(
+            f"T{t['id']:04d} ({t.get('title', 'untitled')}, status: {t.get('status', '?')})"
+            for t in active_tasks
+        )
+        body = f"Nudge: you have assigned tasks that need attention: {task_lines}. Please review and continue working."
+    else:
+        body = "Nudge: please check if there are any tasks or messages that need your attention."
+
+    send_message(hc_home, team, SYSTEM_USER, name, body)
+    success(f"Nudged agent '{name}' on team '{team}'")
+    if active_tasks:
+        info(f"  {len(active_tasks)} active task(s) mentioned in nudge")
+
+
+# ──────────────────────────────────────────────────────────────
 # delegate config set passphrase
 # ──────────────────────────────────────────────────────────────
 
