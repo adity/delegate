@@ -396,6 +396,20 @@ export async function completeTaskFiles(taskId, q) {
   const data = await res.json();
   return data.entries || [];
 }
+// --- Agent actions ---
+
+export async function nudgeAgent(agent, team) {
+  const r = await fetch(`/api/agents/${agent}/nudge?team=${encodeURIComponent(team)}`, { method: "POST" });
+  if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.detail || r.statusText); }
+  return r.json();
+}
+
+export async function interruptAgent(agent, team) {
+  const r = await fetch(`/api/agents/${agent}/interrupt?team=${encodeURIComponent(team)}`, { method: "POST" });
+  if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.detail || r.statusText); }
+  return r.json();
+}
+
 // --- File Upload ---
 
 export async function uploadFiles(team, files, onProgress) {
