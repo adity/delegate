@@ -412,6 +412,21 @@ class Telephone:
         """
         await self._ensure_client()
 
+    async def interrupt(self) -> None:
+        """Interrupt the current turn and reset conversation state.
+
+        Sends the SDK interrupt signal to stop the in-progress query,
+        then resets the telephone so the next send() starts a fresh
+        generation (preserving memory).
+        """
+        if self._client is not None:
+            try:
+                await self._client.interrupt()
+            except Exception:
+                pass
+        # Reset conversation so agent starts fresh on next turn
+        self.reset()
+
     async def close(self) -> None:
         """Disconnect the SDK client and release the subprocess."""
         for client in (self._client, self._stale_client):

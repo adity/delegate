@@ -547,9 +547,10 @@ def _process_auto_stages(hc_home: Path, team: str) -> None:
 # ---------------------------------------------------------------------------
 
 # Module-level tracking of active agent asyncio tasks for shutdown
-_active_agent_tasks: set[asyncio.Task] = set()
+_active_agent_tasks: dict[tuple[str, str], asyncio.Task] = {}
 _active_merge_tasks: set[asyncio.Task] = set()
 _shutdown_flag: bool = False
+_exchange = None  # TelephoneExchange; set during lifespan
 
 def _ensure_task_infra(
     hc_home: Path,
@@ -682,6 +683,7 @@ async def _daemon_loop(
     from delegate.bootstrap import get_member_by_role
     from delegate.mailbox import send as send_message, agents_with_unread
     from delegate.task import format_task_id
+    from delegate.activity import broadcast_turn_event
 
     logger.info("Daemon loop started — polling every %.1fs", interval)
 
@@ -753,6 +755,7 @@ async def _daemon_loop(
                     )
             except asyncio.CancelledError:
                 logger.info("Turn cancelled | agent=%s | team=%s", agent, team)
+                broadcast_turn_event('turn_interrupted', agent, team=team)
                 raise
             except Exception:
                 logger.exception("Uncaught error in turn | agent=%s | team=%s", agent, team)
@@ -813,8 +816,8 @@ async def _daemon_loop(
                             continue
                         in_flight.add(key)
                     agent_task = asyncio.create_task(_dispatch_turn(team, agent))
-                    _active_agent_tasks.add(agent_task)
-                    agent_task.add_done_callback(_active_agent_tasks.discard)
+                    _active_agent_tasks[key] = agent_task
+                    agent_task.add_done_callback(lambda t, k=key: _active_agent_tasks.pop(k, None))
 
                 # Process auto stages (merge, etc.) — serialized, one at a time
                 if not _shutdown_flag:
@@ -933,6 +936,8 @@ async def _lifespan(app: FastAPI):
         token_budget = int(budget_str) if budget_str else None
 
         exchange = TelephoneExchange()
+        global _exchange
+        _exchange = exchange
 
         # Reconcile project_map.json with the DB projects table.
         # If either source is incomplete (e.g. after a partial nuke),
@@ -1030,21 +1035,22 @@ async def _lifespan(app: FastAPI):
         # Cancel all in-flight agent tasks with timeout
         if _active_agent_tasks:
             logger.info("Waiting for %d agent session(s) to finish...", len(_active_agent_tasks))
-            # Snapshot the set before iteration to avoid mutation during iteration
-            for agent_task in list(_active_agent_tasks):
+            # Snapshot the values before iteration to avoid mutation during iteration
+            agent_tasks_snapshot = list(_active_agent_tasks.values())
+            for agent_task in agent_tasks_snapshot:
                 agent_task.cancel()
 
             # Wait for tasks to finish with 10 second timeout
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*_active_agent_tasks, return_exceptions=True),
+                    asyncio.gather(*agent_tasks_snapshot, return_exceptions=True),
                     timeout=10.0
                 )
                 logger.info("All agent sessions finished")
             except asyncio.TimeoutError:
                 logger.warning(
                     "Timeout waiting for agent sessions — %d task(s) still running",
-                    len([t for t in _active_agent_tasks if not t.done()])
+                    len([t for t in agent_tasks_snapshot if not t.done()])
                 )
             _active_agent_tasks.clear()
 
@@ -1058,6 +1064,7 @@ async def _lifespan(app: FastAPI):
                 logger.warning("Timeout closing Telephone conversations")
             except Exception:
                 logger.exception("Error closing Telephone conversations")
+            _exchange = None
 
     # Clean up PID file (background daemon may exit without going through
     # stop_daemon — e.g. port conflict, crash, OS signal).
@@ -3140,6 +3147,53 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         """Return the most recent activity entries for an agent."""
         from delegate.activity import get_recent
         return get_recent(team, name, n=n)
+
+    @app.post("/api/agents/{agent}/interrupt")
+    async def interrupt_agent(agent: str, team: str | None = None):
+        """Interrupt an agent's current turn and reset its conversation.
+
+        If the agent is currently running a turn, cancels the asyncio task
+        and sends an interrupt signal to the Telephone subprocess. The agent
+        will be available for new turns on the next daemon cycle.
+        """
+        from delegate.activity import broadcast_turn_event
+
+        # Resolve team: use provided team, or scan all teams
+        teams = [team] if team else _list_teams(hc_home)
+        resolved_team = None
+        for t in teams:
+            if (t, agent) in _active_agent_tasks:
+                resolved_team = t
+                break
+
+        # If not found in active tasks, check if agent exists in any team
+        if resolved_team is None:
+            for t in teams:
+                ad = _agent_dir(hc_home, t, agent)
+                if ad.is_dir():
+                    resolved_team = t
+                    break
+
+        if resolved_team is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent}' not found")
+
+        key = (resolved_team, agent)
+
+        # Cancel the asyncio task if running
+        task = _active_agent_tasks.get(key)
+        was_running = task is not None and not task.done()
+        if was_running:
+            task.cancel()
+
+        # Send interrupt signal to the Telephone
+        if _exchange is not None:
+            tel = _exchange.get(resolved_team, agent)
+            if tel is not None:
+                await tel.interrupt()
+
+        if was_running:
+            return {"status": "interrupted", "agent": agent, "team": resolved_team}
+        return {"status": "not_running", "agent": agent, "team": resolved_team}
 
     @app.get("/teams/{team}/activity/stream")
     async def activity_stream(team: str):

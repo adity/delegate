@@ -961,6 +961,13 @@ async def run_turn(
         try:
             await _stream_telephone(tel, user_msg, **stream_kw)
 
+        except asyncio.CancelledError:
+            alog.info("Turn interrupted")
+            result.error = "interrupted"
+            result.turns = 1
+            error_occurred = True
+            _mark_batch_processed(hc_home, team, batch)
+            raise
         except Exception as exc:
             alog.session_error(exc)
             result.error = str(exc)
