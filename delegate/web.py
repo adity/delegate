@@ -676,7 +676,7 @@ def _dispatch_review_request(
     from delegate.config import get_auto_approver_config
     from delegate.task import list_tasks as _list_tasks, format_task_id
     from delegate.review import get_current_review
-    from delegate.mailbox import send as send_message
+    from delegate.mailbox import send as send_message, read_inbox
 
     cfg = get_auto_approver_config(hc_home, team)
     if not cfg["enabled"]:
@@ -693,11 +693,17 @@ def _dispatch_review_request(
     if not candidates:
         return
 
+    # Skip if the reviewer has ANY unprocessed messages — one review at a time.
+    # This prevents flooding the reviewer with duplicate requests.
+    unread = read_inbox(hc_home, team, reviewer_name, unread_only=True)
+    if unread:
+        return
+
     # Sort by merge priority
     from delegate.merge import _sort_merge_candidates
     candidates = _sort_merge_candidates(hc_home, team, candidates)
 
-    # Pick only the top candidate — one review at a time
+    # Pick only the top candidate
     task = candidates[0]
     task_id = task["id"]
 

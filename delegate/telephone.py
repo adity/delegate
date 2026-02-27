@@ -519,11 +519,27 @@ class Telephone:
         # when can_use_tool was set.
         await self._client.query(effective_prompt)
 
+        prompt_too_long = False
         async for msg in self._client.receive_response():
             self._track_message(msg)
+            # Detect "Prompt is too long" from Claude Code CLI — the context
+            # window is full but usage.input_tokens is 0 so needs_rotation
+            # never fires.  Flag it and force a rotation after yielding.
+            if hasattr(msg, "content"):
+                for block in msg.content:
+                    if hasattr(block, "text") and "prompt is too long" in (block.text or "").lower():
+                        prompt_too_long = True
             yield msg
 
         self.turns += 1
+
+        # Force rotation on prompt-too-long so the next send() starts fresh.
+        if prompt_too_long and self.turns > 0:
+            logger.info(
+                "Telephone %s: prompt too long detected — forcing rotation",
+                self.id[:8],
+            )
+            await self.rotate(summary_prompt=None)
 
     async def rotate(self, summary_prompt: str | None = _UNSET) -> str | None:
         """Rotate the conversation — summarise, update memory, reset.
