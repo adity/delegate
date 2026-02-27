@@ -406,6 +406,22 @@ export async function setTaskFreeze(team, config) {
   return r.ok ? r.json() : null;
 }
 
+// --- Max tasks limit ---
+
+export async function fetchMaxTasks(team) {
+  const r = await fetch(`/teams/${team}/max-tasks`);
+  return r.ok ? r.json() : { enabled: false, limit: 10 };
+}
+
+export async function setMaxTasks(team, config) {
+  const r = await fetch(`/teams/${team}/max-tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return r.ok ? r.json() : null;
+}
+
 // --- Version ---
 
 export async function fetchVersion() {

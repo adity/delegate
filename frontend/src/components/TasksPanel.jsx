@@ -4,7 +4,7 @@ import { cap, prettyName, fmtStatus, taskIdStr } from "../utils.js";
 import { playTaskSound, playApprovalSound } from "../audio.js";
 import { seedTaskCache } from "./TaskSidePanel.jsx";
 import { FilterBar, applyFilters } from "./FilterBar.jsx";
-import { fetchMergeOrder, fetchAutoApprover, setAutoApprover, fetchTaskFreeze, setTaskFreeze } from "../api.js";
+import { fetchMergeOrder, fetchAutoApprover, setAutoApprover, fetchTaskFreeze, setTaskFreeze, fetchMaxTasks, setMaxTasks } from "../api.js";
 import { PillSelect } from "./PillSelect.jsx";
 import { CopyBtn } from "./CopyBtn.jsx";
 
@@ -34,6 +34,8 @@ export function TasksPanel() {
   const [mergeOrder, setMergeOrder] = useState(null);
   const [autoApprover, setAutoApproverState] = useState(false);
   const [taskFreezeOn, setTaskFreezeOn] = useState(false);
+  const [maxTasksEnabled, setMaxTasksEnabled] = useState(false);
+  const [maxTasksLimit, setMaxTasksLimit] = useState(10);
   const searchTimerRef = useRef(null);
   const prevStatusRef = useRef({});
 
@@ -125,6 +127,18 @@ export function TasksPanel() {
     return () => { cancelled = true; };
   }, [team]);
 
+  // Fetch max-tasks config on mount / team change
+  useEffect(() => {
+    let cancelled = false;
+    fetchMaxTasks(team).then(data => {
+      if (!cancelled) {
+        setMaxTasksEnabled(!!data?.enabled);
+        setMaxTasksLimit(data?.limit ?? 10);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [team]);
+
   const toggleAutoApprover = useCallback(() => {
     const next = !autoApprover;
     setAutoApproverState(next);
@@ -136,6 +150,20 @@ export function TasksPanel() {
     setTaskFreezeOn(next);
     setTaskFreeze(team, { enabled: next });
   }, [taskFreezeOn, team]);
+
+  const toggleMaxTasks = useCallback(() => {
+    const next = !maxTasksEnabled;
+    setMaxTasksEnabled(next);
+    setMaxTasks(team, { enabled: next, limit: maxTasksLimit });
+  }, [maxTasksEnabled, team, maxTasksLimit]);
+
+  const updateMaxTasksLimit = useCallback((val) => {
+    const n = Math.max(1, parseInt(val) || 10);
+    setMaxTasksLimit(n);
+    if (maxTasksEnabled) {
+      setMaxTasks(team, { enabled: true, limit: n });
+    }
+  }, [maxTasksEnabled, team]);
 
   // Build dynamic field config from task data
   const fieldConfig = useMemo(() => {
@@ -383,6 +411,31 @@ export function TasksPanel() {
           </svg>
           Task freeze
         </button>
+        <button
+          class={`merge-sort-toggle${maxTasksEnabled ? " active" : ""}`}
+          onClick={toggleMaxTasks}
+          title={maxTasksEnabled ? `Max tasks is ON — limit ${maxTasksLimit}` : "Enable max tasks limit"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 2v10M4 5l3-3 3 3" />
+          </svg>
+          Max tasks
+        </button>
+        {maxTasksEnabled && (
+          <input
+            type="number"
+            min="1"
+            max="100"
+            value={maxTasksLimit}
+            onInput={(e) => updateMaxTasksLimit(e.target.value)}
+            onFocus={() => { isInputFocused.value = true; }}
+            onBlur={() => { isInputFocused.value = false; }}
+            class="max-tasks-input"
+            style={{ width: "48px", marginLeft: "4px", padding: "2px 4px", fontSize: "12px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", textAlign: "center" }}
+            title="Maximum active tasks"
+          />
+        )}
         <div style={{ flex: 1 }} />
         <div class={searchExpanded ? "filter-search-wrap expanded" : "filter-search-wrap"}>
           {!searchExpanded ? (

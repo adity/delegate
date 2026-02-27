@@ -427,6 +427,35 @@ def update_task_freeze_config(hc_home: Path, team: str, **kwargs) -> dict:
     return {**_TASK_FREEZE_DEFAULTS, **current}
 
 
+# ---------------------------------------------------------------------------
+# Max-tasks limit (per-team, stored in repos.yaml under 'max_tasks')
+# ---------------------------------------------------------------------------
+
+_MAX_TASKS_DEFAULTS = {"enabled": False, "limit": 10}
+
+
+def get_max_tasks_config(hc_home: Path, team: str) -> dict:
+    """Return the max-tasks config for a team."""
+    data = _read_repos(hc_home, team)
+    stored = data.get("max_tasks", {})
+    return {**_MAX_TASKS_DEFAULTS, **stored}
+
+
+def update_max_tasks_config(hc_home: Path, team: str, **kwargs) -> dict:
+    """Update max-tasks config keys (enabled, limit).
+
+    Returns the updated config dict.
+    """
+    data = _read_repos(hc_home, team)
+    current = data.get("max_tasks", {})
+    for key in ("enabled", "limit"):
+        if key in kwargs:
+            current[key] = kwargs[key]
+    data["max_tasks"] = current
+    _write_repos(hc_home, team, data)
+    return {**_MAX_TASKS_DEFAULTS, **current}
+
+
 # --- Repo test_cmd ---
 
 def get_repo_test_cmd(hc_home: Path, team: str, repo_name: str) -> str | None:

@@ -1375,7 +1375,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             tasks_data = _list_tasks(hc_home, initial_team)
             messages_data = _get_messages(hc_home, initial_team, limit=100)
 
-            from delegate.config import get_auto_approver_config, get_task_freeze_config
+            from delegate.config import get_auto_approver_config, get_task_freeze_config, get_max_tasks_config
             result["initial_data"] = {
                 "tasks": tasks_data,
                 "agents": agents_data,
@@ -1383,6 +1383,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 "messages": messages_data,
                 "auto_approver": get_auto_approver_config(hc_home, initial_team),
                 "task_freeze": get_task_freeze_config(hc_home, initial_team),
+                "max_tasks": get_max_tasks_config(hc_home, initial_team),
             }
 
         return result
@@ -1434,6 +1435,25 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         if "enabled" in body:
             kwargs["enabled"] = bool(body["enabled"])
         return update_task_freeze_config(hc_home, team, **kwargs)
+
+    # --- Max-tasks limit endpoints ---
+
+    @app.get("/teams/{team}/max-tasks")
+    def get_max_tasks(team: str):
+        """Return the max-tasks config for a team."""
+        from delegate.config import get_max_tasks_config
+        return get_max_tasks_config(hc_home, team)
+
+    @app.post("/teams/{team}/max-tasks")
+    def post_max_tasks(team: str, body: dict):
+        """Update max-tasks config (enabled, limit)."""
+        from delegate.config import update_max_tasks_config
+        kwargs = {}
+        if "enabled" in body:
+            kwargs["enabled"] = bool(body["enabled"])
+        if "limit" in body:
+            kwargs["limit"] = int(body["limit"])
+        return update_max_tasks_config(hc_home, team, **kwargs)
 
     # --- Workflow endpoints (team-scoped) ---
 
