@@ -693,10 +693,12 @@ def _dispatch_review_request(
     if not candidates:
         return
 
-    # Skip if the reviewer has ANY unprocessed messages — one review at a time.
+    # Skip if the reviewer has ANY unclaimed messages — one review at a time.
     # This prevents flooding the reviewer with duplicate requests.
-    unread = read_inbox(hc_home, team, reviewer_name, unread_only=True)
-    if unread:
+    # Check seen_at IS NULL (not just processed_at IS NULL) so stale
+    # claimed messages from previous sessions don't block new dispatches.
+    from delegate.mailbox import has_unclaimed_messages
+    if has_unclaimed_messages(hc_home, team, reviewer_name):
         return
 
     # Sort by merge priority

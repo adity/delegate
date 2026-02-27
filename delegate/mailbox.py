@@ -430,6 +430,22 @@ def has_unread(hc_home: Path, team: str, agent: str) -> bool:
     return row is not None
 
 
+def has_unclaimed_messages(hc_home: Path, team: str, agent: str) -> bool:
+    """Check if an agent has any unclaimed messages (seen_at IS NULL)."""
+    team_uuid = _team(hc_home, team)
+    conn = get_connection(hc_home, team)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE type = 'chat' AND project_uuid = ? "
+            "AND recipient = ? AND delivered_at IS NOT NULL "
+            "AND processed_at IS NULL AND seen_at IS NULL LIMIT 1",
+            (team_uuid, agent),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
 def agents_with_unread(hc_home: Path, team: str) -> list[str]:
     """Return all recipient names that have at least one unclaimed message.
 
