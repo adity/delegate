@@ -232,12 +232,19 @@ delegate network disallow example.com             # Remove a domain
 delegate network reset                            # Restore curated defaults
 ```
 
-### Set Auto Approval
+### Auto Approval
 
 By default, Delegate expects you to do a final code review and give explicit
-approval before merging into your local repo's main. If you wanted, you can set 
-it to auto approval:
+approval before merging into your local repo's main. You can enable auto-approval
+in two ways:
 
+**Option 1: Reviewer agent (recommended).** Add a reviewer agent to your team:
+```bash
+delegate agent add myteam reviewer --role reviewer
+```
+Then enable the Auto-approve toggle in the Tasks panel UI. When tasks reach `in_approval`, the reviewer agent evaluates diffs using MCP tools (`task_diff`, `task_approve`, `task_reject`), checks for sensitive files, and approves or rejects automatically. Sensitive files (CI configs, secrets, agent instructions) are escalated to you for human review.
+
+**Option 2: Repo-level auto-approval.** For simpler setups without a reviewer agent:
 ```bash
 delegate repo set-approval myteam my-repo auto
 ```

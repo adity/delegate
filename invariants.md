@@ -162,7 +162,8 @@ never invoke `delegate` CLI commands or access the database directly.
 - `create_agent_mcp_server()` in `mcp_tools.py` exposes
   `mailbox_send`, `task_create`, `task_list`, `task_show`,
   `task_assign`, `task_status`, `task_comment`, `task_cancel`,
-  `task_attach`, `task_detach`, `repo_list`, and `mailbox_inbox`.
+  `task_attach`, `task_detach`, `repo_list`, `mailbox_inbox`,
+  `rebase_to_main`, `task_diff`, `task_approve`, and `task_reject`.
 - These tools run in the daemon process, outside the agent's OS
   sandbox, so they can read/write `protected/` files.
 - System prompts explicitly instruct agents to use MCP tools instead

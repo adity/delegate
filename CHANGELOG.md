@@ -6,6 +6,7 @@ All notable changes to Delegate are documented here.
 - **Skip Auth Check** - some enterprise users authenticate in custom ways, so added
  check for delegate to skip auth check. For such cases, authentication will be
  managed outside of Delegate now
+- **Reviewer agent role** — new `reviewer` role with dedicated MCP tools (`task_diff`, `task_approve`, `task_reject`). When a reviewer agent is on the team, the daemon dispatches review requests through the standard turn mechanism instead of the in-process LLM judge. Includes sensitive file escalation (reviewer escalates to human instead of approving/rejecting), rebase-needed detection, and merge-priority ordering. Falls back to the original `auto_approve_once` when no reviewer agent exists.
 
 ## 0.2.8 — 2026-02-20
 
