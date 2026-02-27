@@ -52,6 +52,7 @@ The merge worker is called from the daemon loop (via ``merge_once``).
 """
 
 import enum
+import heapq
 import logging
 import os
 import random
@@ -1033,6 +1034,107 @@ def _handle_merge_failure(
     )
 
 
+def _sort_merge_candidates(
+    hc_home: Path,
+    team: str,
+    tasks: list[dict],
+) -> list[dict]:
+    """Sort approved tasks for optimal merge ordering.
+
+    Uses a topological sort (Kahn's algorithm) with priority tiebreakers:
+
+    1. **Dependency order** (correctness): If task B depends on task A and
+       both are in the candidate list, A merges first.
+    2. **Least file overlap** (primary tiebreaker): Tasks whose changed
+       files overlap least with other candidates merge first.
+    3. **Smallest diff** (secondary tiebreaker): Tasks with fewer changed
+       files merge first (smaller blast radius).
+
+    Returns a new list of tasks in optimal merge order.
+    """
+    if len(tasks) <= 1:
+        return list(tasks)
+
+    candidate_ids = {t["id"] for t in tasks}
+    task_by_id = {t["id"]: t for t in tasks}
+
+    # --- Compute changed files per task ---
+    changed_files: dict[int, set[str]] = {}
+    for t in tasks:
+        tid = t["id"]
+        repos = t.get("repo", [])
+        base_sha_map = t.get("base_sha") or {}
+        branch = t.get("branch", "")
+        files: set[str] = set()
+        for repo_name in repos:
+            repo_path = get_repo_path(hc_home, team, repo_name)
+            base = base_sha_map.get(repo_name)
+            if not base or not branch:
+                continue
+            try:
+                diff_result = subprocess.run(
+                    ["git", "diff", "--name-only", f"{base}..{branch}"],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                logger.warning("_sort_merge_candidates: diff failed for task %s repo %s: %s", tid, repo_name, exc)
+                continue
+            if diff_result.returncode == 0:
+                for f in diff_result.stdout.strip().splitlines():
+                    files.add(f"{repo_name}:{f}")
+        changed_files[tid] = files
+
+    # --- Compute overlap counts ---
+    overlap_count: dict[int, int] = {}
+    task_ids = list(candidate_ids)
+    for i, tid_a in enumerate(task_ids):
+        count = 0
+        for j, tid_b in enumerate(task_ids):
+            if i != j:
+                count += len(changed_files.get(tid_a, set()) & changed_files.get(tid_b, set()))
+        overlap_count[tid_a] = count
+
+    # --- Build dependency graph (only edges within candidates) ---
+    in_degree: dict[int, int] = {t["id"]: 0 for t in tasks}
+    dependents: dict[int, list[int]] = {t["id"]: [] for t in tasks}
+    for t in tasks:
+        tid = t["id"]
+        for dep_id in t.get("depends_on", []):
+            if dep_id in candidate_ids:
+                in_degree[tid] += 1
+                dependents[dep_id].append(tid)
+
+    # --- Kahn's algorithm with priority heap ---
+    # Priority tuple: (overlap_count, file_count, task_id)
+    ready: list[tuple[int, int, int]] = []
+    for tid in candidate_ids:
+        if in_degree[tid] == 0:
+            fc = len(changed_files.get(tid, set()))
+            heapq.heappush(ready, (overlap_count.get(tid, 0), fc, tid))
+
+    sorted_tasks: list[dict] = []
+    while ready:
+        _, _, tid = heapq.heappop(ready)
+        sorted_tasks.append(task_by_id[tid])
+        for dep_tid in dependents[tid]:
+            in_degree[dep_tid] -= 1
+            if in_degree[dep_tid] == 0:
+                fc = len(changed_files.get(dep_tid, set()))
+                heapq.heappush(ready, (overlap_count.get(dep_tid, 0), fc, dep_tid))
+
+    # If there are cycles (shouldn't happen), append remaining tasks
+    if len(sorted_tasks) < len(tasks):
+        seen = {t["id"] for t in sorted_tasks}
+        for t in tasks:
+            if t["id"] not in seen:
+                sorted_tasks.append(t)
+
+    return sorted_tasks
+
+
 def merge_once(
     hc_home: Path,
     team: str,
@@ -1063,6 +1165,8 @@ def merge_once(
     processed_ids: set[int] = set()
 
     # --- 1. Newly approved tasks ---
+    # Collect all ready candidates first, then sort for optimal ordering.
+    ready_tasks: list[dict] = []
     for task in list_tasks(hc_home, team, status="in_approval"):
         task_id = task["id"]
         repos: list[str] = task.get("repo", [])
@@ -1092,6 +1196,14 @@ def merge_once(
 
         if not ready:
             continue
+
+        ready_tasks.append(task)
+
+    # Sort candidates to minimize merge conflicts
+    sorted_candidates = _sort_merge_candidates(hc_home, team, ready_tasks)
+
+    for task in sorted_candidates:
+        task_id = task["id"]
 
         # Transition to merging with assignee = manager
         transition_task(hc_home, team, task_id, "merging", manager)
