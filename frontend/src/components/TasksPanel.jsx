@@ -4,7 +4,7 @@ import { cap, prettyName, fmtStatus, taskIdStr } from "../utils.js";
 import { playTaskSound, playApprovalSound } from "../audio.js";
 import { seedTaskCache } from "./TaskSidePanel.jsx";
 import { FilterBar, applyFilters } from "./FilterBar.jsx";
-import { fetchMergeOrder } from "../api.js";
+import { fetchMergeOrder, fetchAutoApprover, setAutoApprover } from "../api.js";
 import { PillSelect } from "./PillSelect.jsx";
 import { CopyBtn } from "./CopyBtn.jsx";
 
@@ -32,6 +32,7 @@ export function TasksPanel() {
   const [collapsedTeams, setCollapsedTeams] = useState(new Set());
   const [mergeSort, setMergeSort] = useState(false);
   const [mergeOrder, setMergeOrder] = useState(null);
+  const [autoApprover, setAutoApproverState] = useState(false);
   const searchTimerRef = useRef(null);
   const prevStatusRef = useRef({});
 
@@ -108,6 +109,19 @@ export function TasksPanel() {
     fetchMergeOrder(team).then(data => { if (!cancelled) setMergeOrder(data); });
     return () => { cancelled = true; };
   }, [mergeSort, team, allTasks]);
+
+  // Fetch auto-approver state on mount / team change
+  useEffect(() => {
+    let cancelled = false;
+    fetchAutoApprover(team).then(data => { if (!cancelled) setAutoApproverState(!!data?.enabled); });
+    return () => { cancelled = true; };
+  }, [team]);
+
+  const toggleAutoApprover = useCallback(() => {
+    const next = !autoApprover;
+    setAutoApproverState(next);
+    setAutoApprover(team, { enabled: next });
+  }, [autoApprover, team]);
 
   // Build dynamic field config from task data
   const fieldConfig = useMemo(() => {
@@ -331,6 +345,18 @@ export function TasksPanel() {
             <path d="M3 2v10M3 12l-2-2M3 12l2-2M8 3h5M8 7h3M8 11h1" />
           </svg>
           Merge order
+        </button>
+        <button
+          class={`merge-sort-toggle${autoApprover ? " active" : ""}`}
+          onClick={toggleAutoApprover}
+          title={autoApprover ? "Auto-approver is ON — AI reviews in_approval tasks" : "Enable AI auto-approver"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="7" cy="7" r="5.5" />
+            <path d="M5 7l1.5 1.5L9 5.5" />
+          </svg>
+          Auto-approve
         </button>
         <div style={{ flex: 1 }} />
         <div class={searchExpanded ? "filter-search-wrap expanded" : "filter-search-wrap"}>

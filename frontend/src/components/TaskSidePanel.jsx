@@ -187,12 +187,14 @@ function ApprovalBar({ task, currentReview, onAction, onEdit }) {
   const { status, approval_status, rejection_reason } = task;
   const reviewSummary = currentReview && currentReview.summary;
   const commentCount = currentReview && currentReview.comments ? currentReview.comments.length : 0;
+  const isAutoReview = currentReview && currentReview.reviewer === "auto-approver";
 
   // Already approved
   if (status === "done" || approval_status === "approved" || result === "approved") {
     return (
       <div class="task-approval-bar task-approval-bar-resolved">
         <span class="approval-badge approval-badge-approved">&#10004; Approved</span>
+        {isAutoReview && <span class="approval-badge" style={{ background: "rgba(99,102,241,0.10)", color: "var(--accent)" }}>AI Reviewed</span>}
         {(summary || reviewSummary) && (
           <span class="task-approval-bar-summary">{summary || reviewSummary}</span>
         )}
@@ -205,6 +207,7 @@ function ApprovalBar({ task, currentReview, onAction, onEdit }) {
     return (
       <div class="task-approval-bar task-approval-bar-resolved">
         <span class="approval-badge approval-badge-rejected">&#10006; Rejected</span>
+        {isAutoReview && <span class="approval-badge" style={{ background: "rgba(99,102,241,0.10)", color: "var(--accent)" }}>AI Reviewed</span>}
         {reason && <span class="task-approval-bar-summary">{reason}</span>}
       </div>
     );

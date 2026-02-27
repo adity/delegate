@@ -346,6 +346,53 @@ def get_repo_approval(hc_home: Path, team: str, repo_name: str) -> str:
     return meta.get("approval", "manual")
 
 
+# ---------------------------------------------------------------------------
+# Auto-approver config (per-team, stored in repos.yaml under 'auto_approver')
+# ---------------------------------------------------------------------------
+
+_AUTO_APPROVER_DEFAULTS = {
+    "enabled": False,
+    "threshold": 3.5,
+    "model": "claude-sonnet-4-20250514",
+}
+
+
+def get_auto_approver_config(hc_home: Path, team: str) -> dict:
+    """Return the auto-approver config for a team.
+
+    Returns dict with keys: enabled (bool), threshold (float), model (str).
+    Missing keys are filled from defaults.
+    """
+    data = _read_repos(hc_home, team)
+    stored = data.get("auto_approver", {})
+    return {**_AUTO_APPROVER_DEFAULTS, **stored}
+
+
+def is_auto_approver_enabled(hc_home: Path, team: str) -> bool:
+    """Return True if the auto-approver is enabled for this team."""
+    return get_auto_approver_config(hc_home, team)["enabled"]
+
+
+def set_auto_approver_enabled(hc_home: Path, team: str, enabled: bool) -> None:
+    """Enable or disable the auto-approver for a team."""
+    update_auto_approver_config(hc_home, team, enabled=enabled)
+
+
+def update_auto_approver_config(hc_home: Path, team: str, **kwargs) -> dict:
+    """Update auto-approver config keys (enabled, threshold, model).
+
+    Returns the updated config dict.
+    """
+    data = _read_repos(hc_home, team)
+    current = data.get("auto_approver", {})
+    for key in ("enabled", "threshold", "model"):
+        if key in kwargs:
+            current[key] = kwargs[key]
+    data["auto_approver"] = current
+    _write_repos(hc_home, team, data)
+    return {**_AUTO_APPROVER_DEFAULTS, **current}
+
+
 # --- Repo test_cmd ---
 
 def get_repo_test_cmd(hc_home: Path, team: str, repo_name: str) -> str | None:

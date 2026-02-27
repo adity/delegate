@@ -834,6 +834,13 @@ async def _daemon_loop(
                 if not _shutdown_flag:
                     async def _run_auto_stages(t: str) -> None:
                         async with merge_sem:
+                            # Auto-approve: review one in_approval task via LLM judge
+                            from delegate.auto_approve import auto_approve_once
+                            try:
+                                await asyncio.to_thread(auto_approve_once, hc_home, t)
+                            except Exception:
+                                logger.debug("auto_approve_once error for %s", t, exc_info=True)
+
                             # Legacy merge path (for tasks without workflow).
                             results = await asyncio.to_thread(
                                 merge_once, hc_home, t,
@@ -1275,11 +1282,13 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             tasks_data = _list_tasks(hc_home, initial_team)
             messages_data = _get_messages(hc_home, initial_team, limit=100)
 
+            from delegate.config import get_auto_approver_config
             result["initial_data"] = {
                 "tasks": tasks_data,
                 "agents": agents_data,
                 "agent_stats": agent_stats,
                 "messages": messages_data,
+                "auto_approver": get_auto_approver_config(hc_home, initial_team),
             }
 
         return result
@@ -1293,6 +1302,27 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         Returns: List of team objects with name, team_id, created_at, agent_count, task_count
         """
         return _get_teams_list()
+
+    # --- Auto-approver endpoints ---
+
+    @app.get("/teams/{team}/auto-approver")
+    def get_auto_approver(team: str):
+        """Return the auto-approver config for a team."""
+        from delegate.config import get_auto_approver_config
+        return get_auto_approver_config(hc_home, team)
+
+    @app.post("/teams/{team}/auto-approver")
+    def post_auto_approver(team: str, body: dict):
+        """Update auto-approver config (enabled, threshold, model)."""
+        from delegate.config import update_auto_approver_config
+        kwargs = {}
+        if "enabled" in body:
+            kwargs["enabled"] = bool(body["enabled"])
+        if "threshold" in body:
+            kwargs["threshold"] = float(body["threshold"])
+        if "model" in body:
+            kwargs["model"] = str(body["model"])
+        return update_auto_approver_config(hc_home, team, **kwargs)
 
     # --- Workflow endpoints (team-scoped) ---
 

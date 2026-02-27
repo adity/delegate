@@ -374,6 +374,22 @@ export async function deleteProject(name) {
   return r.json();
 }
 
+// --- Auto-approver ---
+
+export async function fetchAutoApprover(team) {
+  const r = await fetch(`/teams/${team}/auto-approver`);
+  return r.ok ? r.json() : { enabled: false, threshold: 3.5 };
+}
+
+export async function setAutoApprover(team, config) {
+  const r = await fetch(`/teams/${team}/auto-approver`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return r.ok ? r.json() : null;
+}
+
 // --- Version ---
 
 export async function fetchVersion() {
