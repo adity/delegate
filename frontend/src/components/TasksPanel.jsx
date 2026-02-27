@@ -4,7 +4,7 @@ import { cap, prettyName, fmtStatus, taskIdStr } from "../utils.js";
 import { playTaskSound, playApprovalSound } from "../audio.js";
 import { seedTaskCache } from "./TaskSidePanel.jsx";
 import { FilterBar, applyFilters } from "./FilterBar.jsx";
-import { fetchMergeOrder, fetchAutoApprover, setAutoApprover } from "../api.js";
+import { fetchMergeOrder, fetchAutoApprover, setAutoApprover, fetchTaskFreeze, setTaskFreeze } from "../api.js";
 import { PillSelect } from "./PillSelect.jsx";
 import { CopyBtn } from "./CopyBtn.jsx";
 
@@ -33,6 +33,7 @@ export function TasksPanel() {
   const [mergeSort, setMergeSort] = useState(false);
   const [mergeOrder, setMergeOrder] = useState(null);
   const [autoApprover, setAutoApproverState] = useState(false);
+  const [taskFreezeOn, setTaskFreezeOn] = useState(false);
   const searchTimerRef = useRef(null);
   const prevStatusRef = useRef({});
 
@@ -117,11 +118,24 @@ export function TasksPanel() {
     return () => { cancelled = true; };
   }, [team]);
 
+  // Fetch task-freeze state on mount / team change
+  useEffect(() => {
+    let cancelled = false;
+    fetchTaskFreeze(team).then(data => { if (!cancelled) setTaskFreezeOn(!!data?.enabled); });
+    return () => { cancelled = true; };
+  }, [team]);
+
   const toggleAutoApprover = useCallback(() => {
     const next = !autoApprover;
     setAutoApproverState(next);
     setAutoApprover(team, { enabled: next });
   }, [autoApprover, team]);
+
+  const toggleTaskFreeze = useCallback(() => {
+    const next = !taskFreezeOn;
+    setTaskFreezeOn(next);
+    setTaskFreeze(team, { enabled: next });
+  }, [taskFreezeOn, team]);
 
   // Build dynamic field config from task data
   const fieldConfig = useMemo(() => {
@@ -357,6 +371,17 @@ export function TasksPanel() {
             <path d="M5 7l1.5 1.5L9 5.5" />
           </svg>
           Auto-approve
+        </button>
+        <button
+          class={`merge-sort-toggle${taskFreezeOn ? " active" : ""}`}
+          onClick={toggleTaskFreeze}
+          title={taskFreezeOn ? "Task freeze is ON — manager will not create new tasks" : "Freeze task creation"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="8" height="8" rx="1.5" />
+          </svg>
+          Task freeze
         </button>
         <div style={{ flex: 1 }} />
         <div class={searchExpanded ? "filter-search-wrap expanded" : "filter-search-wrap"}>

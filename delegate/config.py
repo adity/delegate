@@ -393,6 +393,40 @@ def update_auto_approver_config(hc_home: Path, team: str, **kwargs) -> dict:
     return {**_AUTO_APPROVER_DEFAULTS, **current}
 
 
+# ---------------------------------------------------------------------------
+# Task-creation freeze (per-team, stored in repos.yaml under 'task_freeze')
+# ---------------------------------------------------------------------------
+
+_TASK_FREEZE_DEFAULTS = {"enabled": False}
+
+
+def get_task_freeze_config(hc_home: Path, team: str) -> dict:
+    """Return the task-freeze config for a team."""
+    data = _read_repos(hc_home, team)
+    stored = data.get("task_freeze", {})
+    return {**_TASK_FREEZE_DEFAULTS, **stored}
+
+
+def is_task_creation_frozen(hc_home: Path, team: str) -> bool:
+    """Return True if task creation is frozen for this team."""
+    return get_task_freeze_config(hc_home, team)["enabled"]
+
+
+def update_task_freeze_config(hc_home: Path, team: str, **kwargs) -> dict:
+    """Update task-freeze config keys (enabled).
+
+    Returns the updated config dict.
+    """
+    data = _read_repos(hc_home, team)
+    current = data.get("task_freeze", {})
+    for key in ("enabled",):
+        if key in kwargs:
+            current[key] = kwargs[key]
+    data["task_freeze"] = current
+    _write_repos(hc_home, team, data)
+    return {**_TASK_FREEZE_DEFAULTS, **current}
+
+
 # --- Repo test_cmd ---
 
 def get_repo_test_cmd(hc_home: Path, team: str, repo_name: str) -> str | None:

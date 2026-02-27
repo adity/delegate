@@ -390,6 +390,22 @@ export async function setAutoApprover(team, config) {
   return r.ok ? r.json() : null;
 }
 
+// --- Task freeze ---
+
+export async function fetchTaskFreeze(team) {
+  const r = await fetch(`/teams/${team}/task-freeze`);
+  return r.ok ? r.json() : { enabled: false };
+}
+
+export async function setTaskFreeze(team, config) {
+  const r = await fetch(`/teams/${team}/task-freeze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  return r.ok ? r.json() : null;
+}
+
 // --- Version ---
 
 export async function fetchVersion() {

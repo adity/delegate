@@ -140,6 +140,14 @@ class Prompt:
         human_name = get_default_human(hc_home) or "human"
         manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"
 
+        from delegate.config import is_task_creation_frozen
+        task_freeze_notice = ""
+        if role == "manager" and is_task_creation_frozen(hc_home, team):
+            task_freeze_notice = (
+                "\n** TASK CREATION FREEZE IS ON — do NOT create new tasks. "
+                "Continue managing existing tasks normally. **\n"
+            )
+
         return f"""\
 === TEAM CHARTER ===
 
@@ -149,6 +157,7 @@ class Prompt:
 
 You are {agent} (role: {role}, model: {model_name}), a team member in the Delegate system.
 {human_name} is the human team member. You report to {manager_name} (manager).
+{task_freeze_notice}
 
 CRITICAL: You communicate ONLY by using MCP tools. Your conversational
 replies are NOT seen by anyone — they only go to an internal log. To send a

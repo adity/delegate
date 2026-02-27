@@ -1375,13 +1375,14 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             tasks_data = _list_tasks(hc_home, initial_team)
             messages_data = _get_messages(hc_home, initial_team, limit=100)
 
-            from delegate.config import get_auto_approver_config
+            from delegate.config import get_auto_approver_config, get_task_freeze_config
             result["initial_data"] = {
                 "tasks": tasks_data,
                 "agents": agents_data,
                 "agent_stats": agent_stats,
                 "messages": messages_data,
                 "auto_approver": get_auto_approver_config(hc_home, initial_team),
+                "task_freeze": get_task_freeze_config(hc_home, initial_team),
             }
 
         return result
@@ -1416,6 +1417,23 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         if "model" in body:
             kwargs["model"] = str(body["model"])
         return update_auto_approver_config(hc_home, team, **kwargs)
+
+    # --- Task-freeze endpoints ---
+
+    @app.get("/teams/{team}/task-freeze")
+    def get_task_freeze(team: str):
+        """Return the task-freeze config for a team."""
+        from delegate.config import get_task_freeze_config
+        return get_task_freeze_config(hc_home, team)
+
+    @app.post("/teams/{team}/task-freeze")
+    def post_task_freeze(team: str, body: dict):
+        """Update task-freeze config (enabled)."""
+        from delegate.config import update_task_freeze_config
+        kwargs = {}
+        if "enabled" in body:
+            kwargs["enabled"] = bool(body["enabled"])
+        return update_task_freeze_config(hc_home, team, **kwargs)
 
     # --- Workflow endpoints (team-scoped) ---
 
