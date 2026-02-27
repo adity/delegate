@@ -95,12 +95,12 @@ The notification includes:
 
 **Your action:** Forward the resolution instructions to the DRI, assign the task back to them (`in_progress`), and ask them to resolve using the `rebase_to_main` MCP tool:
 
-1. DRI calls `rebase_to_main(task_id=NNNN)` — this resets HEAD to main and keeps all changes staged, then updates `base_sha` automatically.
-2. DRI resolves any conflicts in the affected files.
+1. DRI calls `rebase_to_main(task_id=NNNN)` — this resets to main and re-applies only the feature's changes. Clean hunks are staged automatically, conflicting files get `<<<<<<<` markers. `base_sha` is updated automatically.
+2. DRI resolves any files with conflict markers.
 3. DRI runs `git add -A && git commit -m "<task title>"`.
 4. Re-submit for review.
 
-> **Note:** Agents do NOT have permission to run `git rebase` or `git reset --soft` directly — they must use the `rebase_to_main` MCP tool which performs this safely.
+> **Note:** Agents do NOT have permission to run `git rebase` or `git reset` directly — they must use the `rebase_to_main` MCP tool which performs this safely.
 
 
 ## Cancellation
