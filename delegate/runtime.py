@@ -780,12 +780,15 @@ async def run_turn(
     max_turns = max(1, token_budget // 4000) if token_budget else None
 
     # --- Message selection: atomically claim ≤5 with same task_id (human first) ---
-    # claim_inbox_batch atomically reads AND marks messages as seen in one
-    # transaction, preventing two concurrent turns from processing the same
-    # messages.  We read a generous limit and then narrow to the batch.
+    # claim_inbox_batch fetches candidates and marks only the selected batch
+    # as seen inside a single BEGIN IMMEDIATE transaction.  Messages not
+    # selected remain untouched and eligible for the next dispatch cycle.
     from delegate.config import get_default_human
-    claimed = claim_inbox_batch(hc_home, team, agent, limit=50)
-    batch = _select_batch(claimed, human_name=get_default_human(hc_home))
+    human_name = get_default_human(hc_home)
+    batch = claim_inbox_batch(
+        hc_home, team, agent, limit=50,
+        select_fn=lambda msgs: _select_batch(msgs, human_name=human_name),
+    )
 
     if not batch:
         log_caller.reset(_prev_caller)
