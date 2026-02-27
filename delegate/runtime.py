@@ -425,6 +425,10 @@ MCP_TOOL_FORMATTERS: dict[str, Any] = {
     "repo_list": lambda inp: ("repo", "list repos"),
     # Git — category: "git"
     "rebase_to_main": lambda inp: ("git", f'rebase T{inp.get("task_id", 0):04d} to main'),
+    # Review — category: "review"
+    "task_diff": lambda inp: ("review", f'diff T{inp.get("task_id", 0):04d}'),
+    "task_approve": lambda inp: ("review", f'approve T{inp.get("task_id", 0):04d}'),
+    "task_reject": lambda inp: ("review", f'reject T{inp.get("task_id", 0):04d}'),
 }
 
 

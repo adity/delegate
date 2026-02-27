@@ -655,6 +655,59 @@ def _ensure_task_infra(
                 )
 
 
+def _dispatch_review_request(
+    hc_home: Path,
+    team: str,
+    reviewer_name: str,
+    recently_dispatched: set[tuple[str, int]],
+) -> None:
+    """Send a review request to the reviewer agent for the top-priority in_approval task.
+
+    Only one review at a time — skips if the top candidate was already dispatched.
+    """
+    from delegate.config import get_auto_approver_config
+    from delegate.task import list_tasks as _list_tasks, format_task_id
+    from delegate.review import get_current_review
+    from delegate.mailbox import send as send_message
+
+    cfg = get_auto_approver_config(hc_home, team)
+    if not cfg["enabled"]:
+        return
+
+    # Collect in_approval tasks without a verdict
+    candidates = []
+    for task in _list_tasks(hc_home, team, status="in_approval"):
+        review = get_current_review(hc_home, team, task["id"])
+        if review and review.get("verdict") is not None:
+            continue
+        candidates.append(task)
+
+    if not candidates:
+        return
+
+    # Sort by merge priority
+    from delegate.merge import _sort_merge_candidates
+    candidates = _sort_merge_candidates(hc_home, team, candidates)
+
+    # Pick only the top candidate — one review at a time
+    task = candidates[0]
+    task_id = task["id"]
+
+    # Idempotency: skip if already dispatched recently
+    key = (team, task_id)
+    if key in recently_dispatched:
+        return
+
+    title = task.get("title", f"T{task_id:04d}")
+    send_message(
+        hc_home, team, "system", reviewer_name,
+        f"Please review {format_task_id(task_id)}: {title}",
+        task_id=task_id,
+    )
+    recently_dispatched.add(key)
+    logger.info("Dispatched review request for %s to %s", format_task_id(task_id), reviewer_name)
+
+
 async def _daemon_loop(
     hc_home: Path,
     interval: float,
@@ -702,6 +755,10 @@ async def _daemon_loop(
     last_stall_check: float = 0.0
     recently_nudged: set[tuple[str, str, int]] = set()  # (team, agent, task_id)
     last_nudge_clear: float = 0.0
+
+    # Reviewer dispatch state — prevents duplicate review requests
+    recently_dispatched: set[tuple[str, int]] = set()  # (team, task_id)
+    last_dispatch_clear: float = 0.0
 
     # In-memory cache: (team, task_id) pairs whose worktrees are confirmed.
     # Cleared when tasks transition to done/cancelled.
@@ -830,16 +887,32 @@ async def _daemon_loop(
                     _active_agent_tasks[key] = agent_task
                     agent_task.add_done_callback(lambda t, k=key: _active_agent_tasks.pop(k, None))
 
+                # Clear recently_dispatched every 5 minutes
+                now_d = _time.monotonic()
+                if now_d - last_dispatch_clear > 300:
+                    recently_dispatched.clear()
+                    last_dispatch_clear = now_d
+
                 # Process auto stages (merge, etc.) — serialized, one at a time
                 if not _shutdown_flag:
                     async def _run_auto_stages(t: str) -> None:
                         async with merge_sem:
-                            # Auto-approve: review one in_approval task via LLM judge
-                            from delegate.auto_approve import auto_approve_once
-                            try:
-                                await asyncio.to_thread(auto_approve_once, hc_home, t)
-                            except Exception:
-                                logger.debug("auto_approve_once error for %s", t, exc_info=True)
+                            # Auto-approve: dispatch to reviewer agent if one exists,
+                            # otherwise fall back to LLM judge in-process.
+                            reviewer_name = get_member_by_role(hc_home, t, "reviewer")
+                            if reviewer_name:
+                                try:
+                                    _dispatch_review_request(
+                                        hc_home, t, reviewer_name, recently_dispatched,
+                                    )
+                                except Exception:
+                                    logger.debug("_dispatch_review_request error for %s", t, exc_info=True)
+                            else:
+                                from delegate.auto_approve import auto_approve_once
+                                try:
+                                    await asyncio.to_thread(auto_approve_once, hc_home, t)
+                                except Exception:
+                                    logger.debug("auto_approve_once error for %s", t, exc_info=True)
 
                             # Legacy merge path (for tasks without workflow).
                             results = await asyncio.to_thread(

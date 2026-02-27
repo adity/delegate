@@ -583,6 +583,205 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             logger.exception("rebase_to_main failed")
             return _error_result(str(e))
 
+    # -----------------------------------------------------------------------
+    # Review tools (used by reviewer agents)
+    # -----------------------------------------------------------------------
+
+    @tool(
+        "task_diff",
+        "Get the diff for a task in review. Returns diff text, task spec, "
+        "sensitive file warnings (if any), and whether a rebase is needed.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID to get the diff for"},
+            },
+            "required": ["task_id"],
+        },
+    )
+    async def task_diff(args: dict) -> dict:
+        try:
+            import subprocess
+            from delegate.task import get_task, get_task_diff as _get_task_diff, format_task_id
+            from delegate.auto_approve import _check_sensitive_files, MAX_DIFF_CHARS
+            from delegate.repo import get_default_branch, get_task_worktree_path
+
+            task_id = args["task_id"]
+            task = get_task(hc_home, team, task_id)
+
+            if task.get("status") != "in_approval":
+                return _error_result(
+                    f"Task {format_task_id(task_id)} is not in_approval "
+                    f"(status: {task.get('status')})"
+                )
+
+            # Get diff
+            try:
+                diff_dict = _get_task_diff(hc_home, team, task_id)
+            except Exception as exc:
+                return _error_result(f"Failed to get diff: {exc}")
+
+            # Combine multi-repo diffs
+            parts = []
+            for repo_name, diff_text in diff_dict.items():
+                if len(diff_dict) > 1:
+                    parts.append(f"# Repo: {repo_name}\n{diff_text}")
+                else:
+                    parts.append(diff_text)
+            combined_diff = "\n\n".join(parts)
+
+            # Check sensitive files
+            sensitive = _check_sensitive_files(combined_diff)
+
+            # Check if branch is behind main
+            rebase_needed = False
+            repos = task.get("repo", [])
+            for repo_name in repos:
+                wt_path = get_task_worktree_path(hc_home, team, repo_name, task_id)
+                if not wt_path.exists():
+                    continue
+                wt_str = str(wt_path)
+                db = get_default_branch(wt_str)
+                # merge-base of branch HEAD vs main HEAD
+                mb = subprocess.run(
+                    ["git", "merge-base", db, "HEAD"],
+                    cwd=wt_str, capture_output=True, text=True, timeout=30,
+                )
+                main_head = subprocess.run(
+                    ["git", "rev-parse", db],
+                    cwd=wt_str, capture_output=True, text=True, timeout=30,
+                )
+                if (mb.returncode == 0 and main_head.returncode == 0
+                        and mb.stdout.strip() != main_head.stdout.strip()):
+                    rebase_needed = True
+                    break
+
+            # Truncate large diffs
+            if len(combined_diff) > MAX_DIFF_CHARS:
+                combined_diff = combined_diff[:MAX_DIFF_CHARS] + "\n\n[... diff truncated at 100K chars ...]"
+
+            result = {
+                "task_id": task_id,
+                "title": task.get("title", ""),
+                "description": task.get("description", ""),
+                "diff": combined_diff,
+                "sensitive_files": sensitive,
+                "rebase_needed": rebase_needed,
+            }
+            return _json_result(result)
+
+        except Exception as e:
+            logger.exception("task_diff failed")
+            return _error_result(str(e))
+
+    @tool(
+        "task_approve",
+        "Approve a task that is in_approval status. Sets the verdict and marks "
+        "the task for auto-merge.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID to approve"},
+                "summary": {"type": "string", "description": "Brief approval summary"},
+            },
+            "required": ["task_id", "summary"],
+        },
+    )
+    async def task_approve(args: dict) -> dict:
+        try:
+            from delegate.task import get_task, update_task, format_task_id
+            from delegate.review import get_current_review, set_verdict
+            from delegate.chat import log_event as _log_event
+
+            task_id = args["task_id"]
+            summary = args.get("summary", "")
+            task = get_task(hc_home, team, task_id)
+
+            if task.get("status") != "in_approval":
+                return _error_result(
+                    f"Task {format_task_id(task_id)} is not in_approval "
+                    f"(status: {task.get('status')})"
+                )
+
+            attempt = task.get("review_attempt", 0)
+            if attempt > 0:
+                set_verdict(
+                    hc_home, team, task_id, attempt, "approved",
+                    summary=summary, reviewer=agent,
+                )
+
+            update_task(hc_home, team, task_id, approval_status="approved")
+
+            _log_event(
+                hc_home, team,
+                f"{format_task_id(task_id)} approved by {agent}: {summary[:80]}",
+                task_id=task_id,
+            )
+
+            return _text_result(f"Task {format_task_id(task_id)} approved")
+
+        except Exception as e:
+            logger.exception("task_approve failed")
+            return _error_result(str(e))
+
+    @tool(
+        "task_reject",
+        "Reject a task that is in_approval status. Sets the verdict, changes "
+        "status to rejected, and notifies the manager.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID to reject"},
+                "reason": {"type": "string", "description": "Specific rejection reason with actionable feedback"},
+            },
+            "required": ["task_id", "reason"],
+        },
+    )
+    async def task_reject(args: dict) -> dict:
+        try:
+            from delegate.task import get_task, update_task, change_status, format_task_id
+            from delegate.review import get_current_review, set_verdict
+            from delegate.notify import notify_rejection
+            from delegate.chat import log_event as _log_event
+
+            task_id = args["task_id"]
+            reason = args.get("reason", "")
+            task = get_task(hc_home, team, task_id)
+
+            if task.get("status") != "in_approval":
+                return _error_result(
+                    f"Task {format_task_id(task_id)} is not in_approval "
+                    f"(status: {task.get('status')})"
+                )
+
+            attempt = task.get("review_attempt", 0)
+            if attempt > 0:
+                set_verdict(
+                    hc_home, team, task_id, attempt, "rejected",
+                    summary=reason, reviewer=agent,
+                )
+
+            update_task(
+                hc_home, team, task_id,
+                rejection_reason=f"Reviewer {agent}: {reason}",
+                approval_status="rejected",
+            )
+            change_status(hc_home, team, task_id, "rejected")
+
+            notify_rejection(hc_home, team, task, reason=f"Reviewer {agent} rejected: {reason}")
+
+            _log_event(
+                hc_home, team,
+                f"{format_task_id(task_id)} rejected by {agent}: {reason[:80]}",
+                task_id=task_id,
+            )
+
+            return _text_result(f"Task {format_task_id(task_id)} rejected")
+
+        except Exception as e:
+            logger.exception("task_reject failed")
+            return _error_result(str(e))
+
     return [
         mailbox_send,
         mailbox_inbox,
@@ -597,6 +796,9 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         task_detach,
         repo_list,
         rebase_to_main,
+        task_diff,
+        task_approve,
+        task_reject,
     ]
 
 
