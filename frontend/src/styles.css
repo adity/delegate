@@ -2575,6 +2575,10 @@ select option:hover {
 .fb-add-btn { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 6px; border: 1px dashed var(--border-default); background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; cursor: pointer; transition: color 100ms, border-color 100ms; }
 .fb-add-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
 .fb-add-btn svg { flex-shrink: 0; }
+.merge-sort-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 6px; border: 1px dashed var(--border-default); background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; cursor: pointer; transition: color 100ms, border-color 100ms, background 100ms; white-space: nowrap; }
+.merge-sort-toggle:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.merge-sort-toggle.active { color: var(--text-primary); border-color: var(--text-secondary); border-style: solid; background: color-mix(in srgb, var(--text-secondary) 10%, transparent); }
+.merge-sort-toggle svg { flex-shrink: 0; }
 .fb-clear-btn { padding: 5px 8px; border-radius: 4px; border: none; background: transparent; color: var(--text-muted); font-family: inherit; font-size: 11px; cursor: pointer; transition: color 100ms; }
 .fb-clear-btn:hover { color: var(--text-primary); }
 .fb-dropdown {

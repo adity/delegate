@@ -31,6 +31,11 @@ export async function fetchTasks(team) {
   return r.ok ? r.json() : [];
 }
 
+export async function fetchMergeOrder(team) {
+  const r = await fetch(`/teams/${team}/tasks/merge-order`);
+  return r.ok ? r.json() : { order: [] };
+}
+
 export async function fetchAllTasks() {
   const r = await fetch(`/api/tasks?team=all`);
   return r.ok ? r.json() : [];

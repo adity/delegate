@@ -135,11 +135,15 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         "task_create",
         "Create a new task for the team. Returns the created task.",
         {
-            "title": str,
-            "description": str,
-            "priority": str,
-            "repo": str,
-            "depends_on": str,
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "priority": {"type": "string", "description": "low, medium, high, or critical"},
+                "repo": {"type": "string", "description": "Repository name for the task"},
+                "depends_on": {"type": "string", "description": "Comma-separated task IDs this depends on"},
+            },
+            "required": ["title"],
         },
     )
     async def task_create(args: dict) -> dict:
@@ -176,8 +180,12 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         "task_list",
         "List tasks for the team, optionally filtered by status or assignee.",
         {
-            "status": str,
-            "assignee": str,
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "Filter by task status"},
+                "assignee": {"type": "string", "description": "Filter by assignee name"},
+            },
+            "required": [],
         },
     )
     async def task_list(args: dict) -> dict:

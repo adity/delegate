@@ -4,6 +4,7 @@ import { cap, prettyName, fmtStatus, taskIdStr } from "../utils.js";
 import { playTaskSound, playApprovalSound } from "../audio.js";
 import { seedTaskCache } from "./TaskSidePanel.jsx";
 import { FilterBar, applyFilters } from "./FilterBar.jsx";
+import { fetchMergeOrder } from "../api.js";
 import { PillSelect } from "./PillSelect.jsx";
 import { CopyBtn } from "./CopyBtn.jsx";
 
@@ -29,6 +30,8 @@ export function TasksPanel() {
   const [searchExpanded, setSearchExpanded] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [collapsedTeams, setCollapsedTeams] = useState(new Set());
+  const [mergeSort, setMergeSort] = useState(false);
+  const [mergeOrder, setMergeOrder] = useState(null);
   const searchTimerRef = useRef(null);
   const prevStatusRef = useRef({});
 
@@ -43,6 +46,7 @@ export function TasksPanel() {
         setSearchQuery(saved.search);
         setSearchExpanded(true); // Expand if there was saved search text
       }
+      if (saved.mergeSort) setMergeSort(true);
     } catch (e) { }
   }, []);
 
@@ -50,10 +54,10 @@ export function TasksPanel() {
   useEffect(() => {
     try {
       sessionStorage.setItem("taskFilters2", JSON.stringify({
-        filters, search: searchQuery,
+        filters, search: searchQuery, mergeSort,
       }));
     } catch (e) { }
-  }, [filters, searchQuery]);
+  }, [filters, searchQuery, mergeSort]);
 
   // History API: push state on filter change
   const filtersRef = useRef(filters);
@@ -96,6 +100,14 @@ export function TasksPanel() {
     if (approvalNeeded) playApprovalSound();
     if (doneNeeded) playTaskSound();
   }, [allTasks]);
+
+  // Fetch merge order when toggle is on
+  useEffect(() => {
+    if (!mergeSort) { setMergeOrder(null); return; }
+    let cancelled = false;
+    fetchMergeOrder(team).then(data => { if (!cancelled) setMergeOrder(data); });
+    return () => { cancelled = true; };
+  }, [mergeSort, team, allTasks]);
 
   // Build dynamic field config from task data
   const fieldConfig = useMemo(() => {
@@ -144,8 +156,17 @@ export function TasksPanel() {
         (t.description || "").toLowerCase().includes(sq)
       );
     }
+    if (mergeSort && mergeOrder?.order?.length) {
+      const idxMap = new Map(mergeOrder.order.map((id, i) => [id, i]));
+      return [...list].sort((a, b) => {
+        const ai = idxMap.has(a.id) ? idxMap.get(a.id) : Infinity;
+        const bi = idxMap.has(b.id) ? idxMap.get(b.id) : Infinity;
+        if (ai !== bi) return ai - bi;
+        return b.id - a.id;
+      });
+    }
     return [...list].sort((a, b) => b.id - a.id);
-  }, [allTasks, filters, searchQuery]);
+  }, [allTasks, filters, searchQuery, mergeSort, mergeOrder]);
 
   const onSearchInput = useCallback((e) => {
     const val = e.target.value;
@@ -300,6 +321,17 @@ export function TasksPanel() {
           onFiltersChange={setFilters}
           fieldConfig={fieldConfig}
         />
+        <button
+          class={`merge-sort-toggle${mergeSort ? " active" : ""}`}
+          onClick={() => setMergeSort(v => !v)}
+          title={mergeSort ? "Showing merge-optimal order" : "Sort by suggested merge order"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 2v10M3 12l-2-2M3 12l2-2M8 3h5M8 7h3M8 11h1" />
+          </svg>
+          Merge order
+        </button>
         <div style={{ flex: 1 }} />
         <div class={searchExpanded ? "filter-search-wrap expanded" : "filter-search-wrap"}>
           {!searchExpanded ? (

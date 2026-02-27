@@ -1060,16 +1060,19 @@ def _sort_merge_candidates(
 
     # --- Compute changed files per task ---
     changed_files: dict[int, set[str]] = {}
+    diff_failed: set[int] = set()  # tasks where git diff failed
     for t in tasks:
         tid = t["id"]
         repos = t.get("repo", [])
         base_sha_map = t.get("base_sha") or {}
         branch = t.get("branch", "")
         files: set[str] = set()
+        task_diff_ok = True
         for repo_name in repos:
             repo_path = get_repo_path(hc_home, team, repo_name)
             base = base_sha_map.get(repo_name)
             if not base or not branch:
+                task_diff_ok = False
                 continue
             try:
                 diff_result = subprocess.run(
@@ -1081,16 +1084,26 @@ def _sort_merge_candidates(
                 )
             except Exception as exc:
                 logger.warning("_sort_merge_candidates: diff failed for task %s repo %s: %s", tid, repo_name, exc)
+                task_diff_ok = False
                 continue
             if diff_result.returncode == 0:
                 for f in diff_result.stdout.strip().splitlines():
                     files.add(f"{repo_name}:{f}")
+            else:
+                task_diff_ok = False
         changed_files[tid] = files
+        if not task_diff_ok:
+            diff_failed.add(tid)
 
     # --- Compute overlap counts ---
+    # Tasks with failed diffs get a high overlap score so they sort last
+    # (conservative: unknown files might conflict with anything).
     overlap_count: dict[int, int] = {}
     task_ids = list(candidate_ids)
     for i, tid_a in enumerate(task_ids):
+        if tid_a in diff_failed:
+            overlap_count[tid_a] = len(tasks) * 1000
+            continue
         count = 0
         for j, tid_b in enumerate(task_ids):
             if i != j:

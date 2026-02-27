@@ -1340,6 +1340,13 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     def get_team_tasks(team: str, status: str | None = None, assignee: str | None = None):
         return _list_tasks(hc_home, team, status=status, assignee=assignee)
 
+    @app.get("/teams/{team}/tasks/merge-order")
+    def get_merge_order(team: str):
+        from delegate.merge import _sort_merge_candidates
+        all_approval = _list_tasks(hc_home, team, status="in_approval")
+        sorted_tasks = _sort_merge_candidates(hc_home, team, all_approval)
+        return {"order": [t["id"] for t in sorted_tasks]}
+
     # --- Message endpoints (team-scoped) ---
 
     @app.get("/teams/{team}/messages")
@@ -3588,6 +3595,12 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         """Dependency: validate bearer token for /internal/* routes.
 
         Returns the satellite name on success, raises 401 on failure.
+
+        TODO: Add per-team/agent authorization.  Currently any valid satellite
+        token grants access to *all* teams and agents.  Each /internal/*
+        endpoint should verify that the satellite actually owns the
+        team/agent it is operating on (e.g. check agent state.yaml
+        ``host`` field matches the satellite name).
         """
         from delegate.auth import validate_satellite_token
 
