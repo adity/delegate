@@ -365,10 +365,12 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
 
     @tool(
         "rebase_to_main",
-        "Rebase the current task branch onto latest main. Performs git reset "
-        "--soft main, updates the task's base_sha to the new main HEAD. Does "
-        "NOT auto-commit -- you must stage and commit changes yourself after "
-        "resolving any conflicts. Fails if the working tree is dirty.",
+        "Rebase the current task branch onto latest main using diff-apply. "
+        "Computes the feature branch's own diff, resets hard to main, then "
+        "re-applies only the feature's changes. Clean hunks are staged "
+        "automatically; conflicting hunks get <<<<<<< markers. Returns "
+        "had_conflicts: true/false. Updates base_sha to main HEAD. "
+        "Fails if the working tree is dirty.",
         {"task_id": int},
     )
     async def rebase_to_main(args: dict) -> dict:
@@ -451,9 +453,43 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
 
                 new_main_sha = main_sha_result.stdout.strip()
 
-                # Perform git reset --soft to default branch
+                # Determine the base SHA for the feature diff.
+                # Use the task's stored base_sha if available, otherwise
+                # compute the merge-base between the default branch and HEAD.
+                base_sha = (task.get("base_sha") or {}).get(repo_name)
+                if not base_sha:
+                    mb_result = subprocess.run(
+                        ["git", "merge-base", db, "HEAD"],
+                        cwd=wt_str,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if mb_result.returncode != 0:
+                        return _error_result(
+                            f"Failed to compute merge-base in {repo_name}: "
+                            f"{mb_result.stderr}"
+                        )
+                    base_sha = mb_result.stdout.strip()
+
+                # Compute the feature branch's own diff (only the agent's changes)
+                diff_result = subprocess.run(
+                    ["git", "diff", "--binary", f"{base_sha}..HEAD"],
+                    cwd=wt_str,
+                    capture_output=True,
+                    timeout=120,
+                )
+                if diff_result.returncode != 0:
+                    return _error_result(
+                        f"Failed to compute feature diff in {repo_name}: "
+                        f"{diff_result.stderr.decode('utf-8', errors='replace')}"
+                    )
+
+                feature_patch = diff_result.stdout  # bytes (binary diff)
+
+                # Reset hard to main (clean slate with all merged files)
                 reset_result = subprocess.run(
-                    ["git", "reset", "--soft", db],
+                    ["git", "reset", "--hard", db],
                     cwd=wt_str,
                     capture_output=True,
                     text=True,
@@ -461,13 +497,52 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 )
                 if reset_result.returncode != 0:
                     return _error_result(
-                        f"git reset --soft {db} failed in {repo_name}: "
+                        f"git reset --hard {db} failed in {repo_name}: "
                         f"{reset_result.stderr}"
                     )
 
+                # Apply the feature diff onto main
+                had_conflicts = False
+                if feature_patch.strip():
+                    apply_result = subprocess.run(
+                        ["git", "apply", "--index", "--3way"],
+                        cwd=wt_str,
+                        input=feature_patch,
+                        capture_output=True,
+                        timeout=120,
+                    )
+                    if apply_result.returncode != 0:
+                        # --3way exits non-zero when there are conflicts,
+                        # but still applies clean hunks and stages them.
+                        # Check if there are conflict markers in the working tree.
+                        conflict_check = subprocess.run(
+                            ["git", "diff", "--name-only", "--diff-filter=U"],
+                            cwd=wt_str,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        # Also check for unmerged paths via ls-files
+                        unmerged_check = subprocess.run(
+                            ["git", "ls-files", "--unmerged"],
+                            cwd=wt_str,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        if unmerged_check.stdout.strip():
+                            had_conflicts = True
+                        else:
+                            # apply failed for a non-conflict reason
+                            return _error_result(
+                                f"git apply failed in {repo_name}: "
+                                f"{apply_result.stderr.decode('utf-8', errors='replace')}"
+                            )
+
                 result_data["repos"][repo_name] = {
                     "new_base_sha": new_main_sha,
-                    "status": "reset_complete",
+                    "had_conflicts": had_conflicts,
+                    "status": "applied_conflicts" if had_conflicts else "applied_clean",
                 }
 
             # Update task base_sha for all repos
@@ -477,10 +552,22 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             }
             update_task(hc_home, team, task_id, base_sha=base_sha_dict)
 
-            result_data["message"] = (
-                f"Successfully reset {format_task_id(task_id)} to main. "
-                f"Changes are staged. Review with 'git status' and commit when ready."
+            had_any_conflicts = any(
+                data.get("had_conflicts") for data in result_data["repos"].values()
             )
+            result_data["had_conflicts"] = had_any_conflicts
+
+            if had_any_conflicts:
+                result_data["message"] = (
+                    f"Rebased {format_task_id(task_id)} onto main with conflicts. "
+                    f"Files with <<<<<<< markers need manual resolution. "
+                    f"After resolving: git add -A && git commit."
+                )
+            else:
+                result_data["message"] = (
+                    f"Successfully rebased {format_task_id(task_id)} onto main. "
+                    f"Changes are staged. Review with 'git status' and commit when ready."
+                )
 
             return _json_result(result_data)
 
