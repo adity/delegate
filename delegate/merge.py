@@ -296,11 +296,17 @@ def _squash_reapply(
     """
     # Get the combined diff: main...branch (three-dot = changes on branch
     # since the merge-base, i.e. the feature's net contribution)
-    diff_result = _run_git(["diff", f"main...{branch}"], cwd=repo_dir)
+    # Use --binary so binary files (images, compiled assets) are included.
+    diff_result = subprocess.run(
+        ["git", "diff", "--binary", f"main...{branch}"],
+        cwd=repo_dir,
+        capture_output=True,
+        timeout=120,
+    )
     if diff_result.returncode != 0:
-        return False, f"Could not compute diff: {diff_result.stderr}"
+        return False, f"Could not compute diff: {diff_result.stderr.decode('utf-8', errors='replace')}"
 
-    patch = diff_result.stdout
+    patch = diff_result.stdout  # bytes (binary diff)
     if not patch.strip():
         # No diff — nothing to apply (branch is already at main)
         return True, "No changes to apply"
@@ -311,11 +317,12 @@ def _squash_reapply(
         cwd=wt_dir,
         input=patch,
         capture_output=True,
-        text=True,
         timeout=120,
     )
     if apply_result.returncode != 0:
-        return False, apply_result.stderr + apply_result.stdout
+        stderr = apply_result.stderr.decode("utf-8", errors="replace")
+        stdout = apply_result.stdout.decode("utf-8", errors="replace")
+        return False, stderr + stdout
 
     # Commit the applied changes
     commit_result = _run_git(
