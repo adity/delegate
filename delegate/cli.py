@@ -452,7 +452,32 @@ def team_remove(ctx: click.Context, name: str, yes: bool) -> None:
 
     hc_home = _get_home(ctx)
     td = _team_dir(hc_home, name)
-    if not td.is_dir():
+
+    # Check if the team exists in ANY source (directory, DB, or project_map)
+    has_dir = td.is_dir()
+    team_uuid: str | None = None
+    has_db_entry = False
+    try:
+        from delegate.db import get_connection
+        conn = get_connection(hc_home)
+        row = conn.execute(
+            "SELECT project_id FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        if row:
+            team_uuid = row["project_id"]
+            has_db_entry = True
+        conn.close()
+    except Exception:
+        pass
+
+    has_map_entry = False
+    try:
+        from delegate.paths import list_team_names
+        has_map_entry = name in list_team_names(hc_home)
+    except Exception:
+        pass
+
+    if not has_dir and not has_db_entry and not has_map_entry:
         click.echo(f"Team '{name}' does not exist.")
         raise SystemExit(1)
 
@@ -462,21 +487,8 @@ def team_remove(ctx: click.Context, name: str, yes: bool) -> None:
             abort=True,
         )
 
-    # Resolve team UUID before we delete the directory (needed for soft_delete_team)
-    team_uuid: str | None = None
-    try:
-        from delegate.db import get_connection
-        conn = get_connection(hc_home)
-        row = conn.execute(
-            "SELECT project_id FROM projects WHERE name = ?", (name,)
-        ).fetchone()
-        if row:
-            team_uuid = row["project_id"]
-        conn.close()
-    except Exception:
-        pass
-
-    shutil.rmtree(td)
+    if has_dir:
+        shutil.rmtree(td)
 
     # Remove from global teams database table
     try:

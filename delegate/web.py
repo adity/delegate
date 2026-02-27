@@ -168,15 +168,23 @@ def _reconcile_team_map(hc_home: Path) -> None:
     except Exception:
         pass
 
-    # Reconcile: DB → project_map.json
+    # Reconcile: DB → project_map.json (only if directory exists)
     for name, uid in db_data.items():
         if name not in map_data:
-            logger.info("Reconcile: adding team '%s' to project_map.json from DB", name)
-            register_team_path(hc_home, name, uid)
+            team_root = _team_dir(hc_home, name)
+            if team_root.is_dir():
+                logger.info("Reconcile: adding team '%s' to project_map.json from DB", name)
+                register_team_path(hc_home, name, uid)
+            else:
+                logger.info("Reconcile: skipping team '%s' — directory missing", name)
 
-    # Reconcile: project_map.json → DB
+    # Reconcile: project_map.json → DB (only if directory exists)
     for name, uid in map_data.items():
         if name not in db_data:
+            team_root = _team_dir(hc_home, name)
+            if not team_root.is_dir():
+                logger.info("Reconcile: skipping team '%s' — directory missing", name)
+                continue
             logger.info("Reconcile: adding team '%s' to DB from project_map.json", name)
             try:
                 conn = get_connection(hc_home)
@@ -1290,6 +1298,10 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             result = []
             for row in teams_rows:
                 team_name = row["name"]
+                # Skip teams whose directory no longer exists (orphaned DB rows)
+                team_root = _team_dir(hc_home, team_name)
+                if not team_root.is_dir():
+                    continue
                 # Cheap dir scan: count agent vs human dirs (no YAML/DB per agent)
                 agent_count = 0
                 human_count = 0
