@@ -538,6 +538,55 @@ def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
         return True, f"{db} fast-forwarded to {branch_tip[:12]} (ref-only, user on {user_branch})"
 
 
+def _reconcile_main_prefer_files(
+    repo_dir: str, wt_dir: str, patterns: list[str],
+) -> list[str]:
+    """Reset files matching *patterns* to main's version in *wt_dir*.
+
+    After a rebase, some files may carry stale edits from the feature branch.
+    This function replaces those files with whatever main currently has, stages
+    the changes, and amends the latest commit so the reset is transparent.
+
+    Returns the list of files that were actually reset.
+    """
+    if not patterns:
+        return []
+
+    db = get_default_branch(repo_dir)
+
+    # Files that differ between the worktree HEAD and main
+    diff_result = _run_git(["diff", "--name-only", f"{db}..HEAD"], cwd=wt_dir)
+    if diff_result.returncode != 0:
+        logger.warning("main-prefer diff failed: %s", diff_result.stderr)
+        return []
+    changed_files = diff_result.stdout.strip().splitlines()
+
+    # Match changed files against the configured patterns
+    from fnmatch import fnmatch
+
+    to_reset: list[str] = []
+    for fname in changed_files:
+        for pat in patterns:
+            if fnmatch(fname, pat) or fname.endswith(f"/{pat}") or fname == pat:
+                to_reset.append(fname)
+                break
+
+    if not to_reset:
+        return []
+
+    # Replace each matched file with main's version
+    for fname in to_reset:
+        checkout = _run_git(["checkout", db, "--", fname], cwd=wt_dir)
+        if checkout.returncode != 0:
+            logger.warning("main-prefer checkout failed for %s: %s", fname, checkout.stderr)
+
+    # Stage and amend
+    _run_git(["add"] + to_reset, cwd=wt_dir)
+    _run_git(["commit", "--amend", "--no-edit"], cwd=wt_dir)
+
+    return to_reset
+
+
 def _ff_merge_to_sha(repo_dir: str, tip_sha: str) -> tuple[bool, str]:
     """Fast-forward merge the default branch to a specific commit SHA.
 
@@ -880,6 +929,31 @@ def merge_task(
         main_head_dict[repo_name] = mr.stdout.strip() if mr.returncode == 0 else ""
 
     update_task(hc_home, team, task_id, base_sha=main_head_dict)
+
+    # -----------------------------------------------------------------------
+    # Phase 2.5: Reconcile main-prefer files.
+    # If the repo has configured file patterns that should always match main,
+    # replace those files with main's version and amend the merge commit.
+    # -----------------------------------------------------------------------
+
+    for repo_name in repos:
+        from delegate.config import get_main_prefer_files
+
+        patterns = get_main_prefer_files(hc_home, team, repo_name)
+        if patterns:
+            wt_path, _ = temp_worktrees[repo_name]
+            reconciled = _reconcile_main_prefer_files(
+                repo_dirs[repo_name], str(wt_path), patterns,
+            )
+            if reconciled:
+                # Re-read the tip SHA since we amended
+                tip_result = _run_git(["rev-parse", "HEAD"], cwd=str(wt_path))
+                if tip_result.returncode == 0:
+                    rebased_tips[repo_name] = tip_result.stdout.strip()
+                logger.info(
+                    "%s: reconciled main-prefer files in %s: %s",
+                    format_task_id(task_id), repo_name, reconciled,
+                )
 
     # -----------------------------------------------------------------------
     # Phase 3: Run pre-merge tests in the merge worktree.

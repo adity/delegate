@@ -799,6 +799,60 @@ def repo_list(ctx: click.Context, team_name: str) -> None:
 
 
 # ──────────────────────────────────────────────────────────────
+# delegate repo prefer-main
+# ──────────────────────────────────────────────────────────────
+
+@repo.command("prefer-main")
+@click.argument("team_name")
+@click.argument("repo_name")
+@click.argument("files", nargs=-1)
+@click.option("--show", is_flag=True, help="Show current main-prefer file patterns.")
+@click.option("--clear", is_flag=True, help="Clear all main-prefer file patterns.")
+@click.pass_context
+def repo_prefer_main(
+    ctx: click.Context, team_name: str, repo_name: str,
+    files: tuple[str, ...], show: bool, clear: bool,
+) -> None:
+    """Configure files that should always use main's version after rebase.
+
+    Examples:
+
+      delegate repo prefer-main myteam myrepo conftest.py tests/conftest.py
+
+      delegate repo prefer-main myteam myrepo --show
+
+      delegate repo prefer-main myteam myrepo --clear
+    """
+    from delegate.config import get_main_prefer_files, update_main_prefer_files
+
+    hc_home = _get_home(ctx)
+
+    if show:
+        patterns = get_main_prefer_files(hc_home, team_name, repo_name)
+        if patterns:
+            click.echo(f"Main-prefer files for {repo_name}:")
+            for p in patterns:
+                click.echo(f"  - {p}")
+        else:
+            click.echo(f"No main-prefer files configured for {repo_name}.")
+        return
+
+    if clear:
+        update_main_prefer_files(hc_home, team_name, repo_name, [])
+        click.echo(f"Cleared main-prefer files for {repo_name}.")
+        return
+
+    if not files:
+        click.echo("Error: provide file patterns, or use --show / --clear.", err=True)
+        raise SystemExit(1)
+
+    update_main_prefer_files(hc_home, team_name, repo_name, list(files))
+    click.echo(f"Set main-prefer files for {repo_name}:")
+    for f in files:
+        click.echo(f"  - {f}")
+
+
+# ──────────────────────────────────────────────────────────────
 # delegate self-update
 # ──────────────────────────────────────────────────────────────
 

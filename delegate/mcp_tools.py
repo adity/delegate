@@ -560,6 +560,48 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             }
             update_task(hc_home, team, task_id, base_sha=base_sha_dict)
 
+            # Reconcile main-prefer files: reset configured patterns to
+            # main's version so agents don't carry stale shared-file edits.
+            from delegate.config import get_main_prefer_files
+            from fnmatch import fnmatch
+
+            all_reconciled: dict[str, list[str]] = {}
+            for repo_name, data in result_data["repos"].items():
+                if data.get("had_conflicts"):
+                    continue
+                wt_str = str(get_task_worktree_path(hc_home, team, repo_name, task_id))
+                patterns = get_main_prefer_files(hc_home, team, repo_name)
+                if not patterns:
+                    continue
+                from delegate.repo import get_default_branch
+                db = get_default_branch(wt_str)
+                diff_r = subprocess.run(
+                    ["git", "diff", "--name-only", f"{db}..HEAD"],
+                    cwd=wt_str, capture_output=True, text=True, timeout=30,
+                )
+                if diff_r.returncode != 0:
+                    continue
+                changed = diff_r.stdout.strip().splitlines()
+                to_reset = [
+                    f for f in changed
+                    if any(fnmatch(f, p) or f.endswith(f"/{p}") or f == p for p in patterns)
+                ]
+                if to_reset:
+                    for f in to_reset:
+                        subprocess.run(
+                            ["git", "checkout", db, "--", f],
+                            cwd=wt_str, capture_output=True, text=True, timeout=30,
+                        )
+                    subprocess.run(
+                        ["git", "add"] + to_reset,
+                        cwd=wt_str, capture_output=True, text=True, timeout=30,
+                    )
+                    all_reconciled[repo_name] = to_reset
+                    data["reconciled_files"] = to_reset
+
+            if all_reconciled:
+                result_data["reconciled_files"] = all_reconciled
+
             had_any_conflicts = any(
                 data.get("had_conflicts") for data in result_data["repos"].values()
             )

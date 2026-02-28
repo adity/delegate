@@ -25,6 +25,10 @@
   something small that could be improved — a misleading variable name,
   a missing error case, a stale comment — fix it. If it's bigger than
   small, flag it to the manager rather than scope-creeping your task.
+- Do not modify shared infrastructure files (test configs, CI configs,
+  lockfiles) to work around test failures. If a test fails in your
+  branch but passes on main, fix your code — not the test harness.
+  If a test is genuinely broken on main, report it to the manager.
 - When you're stuck for more than 10 minutes, say so. Write what you
   tried in your worklog and message the manager. Spinning in silence
   is the most expensive mistake.

@@ -476,6 +476,24 @@ def update_repo_test_cmd(hc_home: Path, team: str, name: str, test_cmd: str) -> 
 
 # --- Repo remote_url ---
 
+# --- Repo main_prefer_files ---
+
+def get_main_prefer_files(hc_home: Path, team: str, repo_name: str) -> list[str]:
+    """Return the list of file patterns that should always use main's version."""
+    repos = get_repos(hc_home, team)
+    meta = repos.get(repo_name, {})
+    return meta.get("main_prefer_files", [])
+
+
+def update_main_prefer_files(hc_home: Path, team: str, name: str, files: list[str]) -> None:
+    """Update the main-prefer file patterns for an existing repo."""
+    data = _read_repos(hc_home, team)
+    if name not in data:
+        raise KeyError(f"Repo '{name}' not found in team '{team}' config")
+    data[name]["main_prefer_files"] = files
+    _write_repos(hc_home, team, data)
+
+
 def get_repo_remote_url(hc_home: Path, team: str, repo_name: str) -> str | None:
     """Return the configured remote URL for a repo, or None if not set."""
     repos = get_repos(hc_home, team)
