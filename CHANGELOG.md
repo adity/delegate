@@ -2,6 +2,13 @@
 
 All notable changes to Delegate are documented here.
 
+## 0.2.10 — 2026-02-27
+
+### Added
+- **Main-prefer files** — configurable list of file patterns per repo that are automatically reset to main's version after rebase. Prevents agents from carrying stale edits to shared infrastructure files (test configs, CI configs, lockfiles) through the merge cycle. Configure with `delegate repo prefer-main <team> <repo> <patterns...>`. Applies in both the merge worker (Phase 2.5, between rebase and tests) and the agent `rebase_to_main` MCP tool.
+- **Engineer charter guidance** — agents are now instructed not to modify shared infrastructure files to work around test failures; fix the code or escalate to the manager.
+- **Manager knowledge** — manager role documentation now covers diagnosing and resolving stuck branches caused by shared-file edits, including how to configure `prefer-main` patterns.
+
 ## 0.2.9 - 2020-02-20
 - **Skip Auth Check** - some enterprise users authenticate in custom ways, so added
  check for delegate to skip auth check. For such cases, authentication will be

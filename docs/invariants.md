@@ -47,10 +47,22 @@ The full merge sequence for a task in `in_approval` state:
    current main HEAD as the new base_sha for each repo. This is done atomically
    with the reset (before disposable WTs are removed).
 
-7. **Remove disposable worktrees** — All temp branches and worktrees created in
+7. **Phase 2.5: Reconcile main-prefer files** — For each repo with configured
+   `main_prefer_files` patterns (see `delegate repo prefer-main`):
+   a. `git diff --name-only main..HEAD` to list files diverging from main.
+   b. Match against the configured patterns (fnmatch glob + basename matching).
+   c. For each matched file: `git checkout main -- <file>` to replace with
+      main's version.
+   d. Stage and `git commit --amend --no-edit` to fold changes into the merge
+      commit.
+   e. Re-read the tip SHA (it changed due to the amend) and update
+      `rebased_tips`.
+   If no patterns are configured for a repo, this step is a no-op.
+
+8. **Remove disposable worktrees** — All temp branches and worktrees created in
    Phase 1 are removed. The agent worktree is now the canonical working copy.
 
-8. **Phase 3: Run pre-merge tests** — `_run_pre_merge()` is called with the
+9. **Phase 3: Run pre-merge tests** — `_run_pre_merge()` is called with the
    **agent worktree path** (not the disposable worktree). This ensures tests run
    in the environment the agent built and reviewed (with `__pycache__`, installed
    packages, build output intact).
@@ -59,21 +71,21 @@ The full merge sequence for a task in `in_approval` state:
    - If tests fail: task becomes `merge_failed`, agent worktree is left at the
      rebased tip (agent can fix and resubmit without manual recovery).
 
-9. **Phase 4: Fast-forward merge** — `_ff_merge_to_sha(repo_dir, tip_sha)`.
-   Merges main to the rebased tip SHA (not a branch ref — the temp branch is
-   already removed).
-   - If user has `main` checked out and clean: `git merge --ff-only <sha>`.
-   - If user has `main` checked out and dirty: fail (retryable: `DIRTY_MAIN`).
-   - If user is on another branch: `git update-ref` with CAS (atomic, ref-only).
+10. **Phase 4: Fast-forward merge** — `_ff_merge_to_sha(repo_dir, tip_sha)`.
+    Merges main to the rebased tip SHA (not a branch ref — the temp branch is
+    already removed).
+    - If user has `main` checked out and clean: `git merge --ff-only <sha>`.
+    - If user has `main` checked out and dirty: fail (retryable: `DIRTY_MAIN`).
+    - If user is on another branch: `git update-ref` with CAS (atomic, ref-only).
 
-10. **Record merge metadata** — `merge_base` and `merge_tip` are stored on the task.
+11. **Record merge metadata** — `merge_base` and `merge_tip` are stored on the task.
 
-11. **Mark done** — `change_status(..., "done")`.
+12. **Mark done** — `change_status(..., "done")`.
 
-12. **Clean up** — Feature branch and agent worktree are removed (if no sibling
-    tasks share the branch). Disposable worktrees were already removed in step 7.
+13. **Clean up** — Feature branch and agent worktree are removed (if no sibling
+    tasks share the branch). Disposable worktrees were already removed in step 8.
 
-13. **Discard lock entry** — `exchange.discard_worktree_lock(team, task_id)` removes
+14. **Discard lock entry** — `exchange.discard_worktree_lock(team, task_id)` removes
     the asyncio.Lock from the registry (prevents unbounded growth).
 
 ---

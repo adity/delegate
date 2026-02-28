@@ -36,6 +36,25 @@ Test 7: Cancel mid-work
 Test 8: Multi-repo task
   Create task spanning two repos → agent works in both → merge
   Verify: both repos have their changes, all-or-nothing (if one fails, neither merges)
+
+Test 8b: Main-prefer file reconciliation
+  Configure prefer-main patterns for conftest.py → agent edits conftest.py
+  on feature branch → approve → merge worker rebases → Phase 2.5 resets
+  conftest.py to main's version → tests pass → merge succeeds
+  Verify: feature code preserved, conftest.py matches main, merge commit
+  includes the reset, no stale shared-file edits in final history
+
+Test 8c: Main-prefer with rebase_to_main MCP tool
+  Configure prefer-main patterns → agent has stale conftest.py edits →
+  agent calls rebase_to_main → result JSON includes reconciled_files →
+  conftest.py is staged with main's version
+  Verify: reconciled_files reported, file content matches main, agent's
+  feature changes are intact
+
+Test 8d: Main-prefer no-op when no patterns configured
+  No prefer-main patterns configured → merge proceeds normally
+  Verify: Phase 2.5 is a no-op, no files reset, identical behavior to
+  before the feature was added
 Tier 2: Workflow engine
 Test 9: Happy path through all stages
   todo → in_progress → in_review → in_approval → merging → done

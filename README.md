@@ -226,6 +226,10 @@ delegate agent add myteam carol --role engineer
 delegate workflow init myteam                     # Register default workflow
 delegate workflow add myteam ./my-workflow.py     # Register custom workflow
 
+delegate repo prefer-main myteam myrepo conftest.py yarn.lock  # Files that always use main's version
+delegate repo prefer-main myteam myrepo --show    # Show current patterns
+delegate repo prefer-main myteam myrepo --clear   # Clear all patterns
+
 delegate network show                             # View network allowlist
 delegate network allow api.github.com             # Allow a domain
 delegate network disallow example.com             # Remove a domain

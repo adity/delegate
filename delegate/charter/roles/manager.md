@@ -85,6 +85,31 @@ Don't let blockers sit — every one needs an owner and next step.
   Transient failures (dirty main, ref races) are retried up to 3 times before escalating.
 - `rejected` — human rejected. Decide: rework (reassign to DRI), reassign to someone else, or discard.
 
+### Stuck branches from shared-file edits
+
+A common pattern: an agent edits a shared infrastructure file (test config,
+lockfile, CI config) as a quick fix. Main gets updated independently. On
+rebase the stale edit comes back, tests fail, the agent touches the file
+again, and the cycle repeats.
+
+**Diagnosis:** Multiple `merge_failed` cycles on the same branch where the
+failing test involves a file that passes on main. The diff shows changes to
+shared config files the agent shouldn't have modified.
+
+**Resolution:** Configure main-prefer patterns so those files are
+automatically reset to main's version after every rebase:
+
+```
+/shell delegate repo prefer-main <team> <repo> conftest.py tests/conftest.py yarn.lock
+```
+
+Once configured, every stuck branch self-heals on its next merge attempt —
+no per-branch manual work needed. The `rebase_to_main` MCP tool also
+respects these patterns, so agents get clean shared files when rebasing
+manually too.
+
+To check current patterns: `/shell delegate repo prefer-main <team> <repo> --show`
+
 ### Handling merge conflicts
 
 When you receive a MERGE_CONFLICT notification, it means both rebase and squash-reapply failed — there are true content conflicts where main and the feature branch modified the same files/lines.
