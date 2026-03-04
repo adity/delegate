@@ -240,6 +240,67 @@ def notify_conflict(
         return None
 
 
+def notify_sensitive_skip(
+    hc_home: Path,
+    team: str,
+    task: dict,
+    sensitive_files: list[str],
+) -> int | None:
+    """Notify the manager that auto-approve skipped a task due to sensitive files.
+
+    Called when auto-approve is enabled but the diff touches files on the
+    sensitive blocklist, requiring human review instead.
+
+    Args:
+        hc_home: Delegate home directory.
+        team: Team name.
+        task: The task dict (must include id, title, assignee).
+        sensitive_files: List of sensitive file paths found in the diff.
+
+    Returns:
+        The delivered message id, or None if delivery failed.
+    """
+    manager = _get_manager_name(hc_home, team)
+    sender = _get_sender_name(hc_home)
+    task_id = task["id"]
+    title = task.get("title", "(untitled)")
+    assignee = task.get("assignee", "(unassigned)")
+
+    file_list = "\n".join(f"  - {f}" for f in sensitive_files)
+    body = (
+        f"AUTO_APPROVE_SKIPPED: {format_task_id(task_id)}\n"
+        f"\n"
+        f"Task: {format_task_id(task_id)} — {title}\n"
+        f"Assignee: {assignee}\n"
+        f"\n"
+        f"Auto-approve could not process this task because the diff\n"
+        f"touches sensitive files that require human review:\n"
+        f"{file_list}\n"
+        f"\n"
+        f"Action required: please review and approve/reject this task manually."
+    )
+
+    msg = Message(
+        sender=sender,
+        recipient=manager,
+        time=_now_iso(),
+        body=body,
+        task_id=task_id,
+    )
+
+    try:
+        msg_id = deliver(hc_home, team, msg)
+        logger.info(
+            "Sensitive skip notification sent for %s to %s", task_id, manager
+        )
+        return msg_id
+    except (ValueError, FileNotFoundError) as e:
+        logger.warning(
+            "Failed to send sensitive skip notification for %s: %s", task_id, e
+        )
+        return None
+
+
 def notify_human_comment(
     hc_home: Path,
     team: str,

@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 MAX_DIFF_CHARS = 100_000
 
+# Track tasks already notified for sensitive file skips (avoids repeat messages)
+_sensitive_notified: set[tuple[str, int]] = set()
+
 # ---------------------------------------------------------------------------
 # Sensitive file blocklist — diffs touching these require human review
 # ---------------------------------------------------------------------------
@@ -164,6 +167,19 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
             "auto_approve: skipping %s — diff touches sensitive files: %s",
             format_task_id(task_id), ", ".join(sensitive),
         )
+
+        notify_key = (team, task_id)
+        if notify_key not in _sensitive_notified:
+            _sensitive_notified.add(notify_key)
+
+            from delegate.notify import notify_sensitive_skip
+            notify_sensitive_skip(hc_home, team, task, sensitive)
+
+            from delegate.chat import log_event as _log_event
+            _log_event(hc_home, team,
+                       f"{format_task_id(task_id)} auto-approve skipped — sensitive files require human review",
+                       task_id=task_id)
+
         return {"task_id": task_id, "verdict": "skipped", "reason": "sensitive_files", "files": sensitive}
 
     # Truncate large diffs
