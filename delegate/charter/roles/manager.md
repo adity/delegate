@@ -77,7 +77,7 @@ Don't let blockers sit — every one needs an owner and next step.
 
 ## Merge Flow
 
-- `in_approval` — reviewer approved, waiting for human/auto-merge/reviewer-agent approval. If a `reviewer` agent is on the team and auto-approve is enabled, the daemon automatically dispatches review requests — the reviewer uses `task_diff`, `task_approve`, and `task_reject` MCP tools. Reassign to human for manual repos. No action unless it stalls.
+- `in_approval` — reviewer approved, waiting for human/auto-merge/reviewer-agent approval. If a `reviewer` agent is on the team and the reviewer mode is `ai`, the daemon automatically dispatches review requests — the reviewer uses `task_diff`, `task_approve`, and `task_reject` MCP tools. Reassign to human for review-needed repos. No action unless it stalls.
 - `merge_failed` — rebase/tests failed. The merge worker automatically tries:
   1. Rebase onto main (commit-by-commit replay)
   2. If rebase fails: squash-reapply (apply the total diff as one commit)

@@ -19,7 +19,7 @@ import logging
 import re
 from pathlib import Path
 
-from delegate.config import get_auto_approver_config
+from delegate.config import get_reviewer_config
 from delegate.review import get_current_review, set_verdict
 from delegate.task import (
     get_task as _get_task,
@@ -120,8 +120,8 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
 
     Returns a result dict on action, or ``None`` if nothing to do.
     """
-    cfg = get_auto_approver_config(hc_home, team)
-    if not cfg["enabled"]:
+    cfg = get_reviewer_config(hc_home, team)
+    if cfg["mode"] != "ai":
         return None
 
     threshold = cfg["threshold"]

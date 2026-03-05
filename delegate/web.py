@@ -673,13 +673,13 @@ def _dispatch_review_request(
 
     Only one review at a time — skips if the top candidate was already dispatched.
     """
-    from delegate.config import get_auto_approver_config
+    from delegate.config import get_reviewer_config
     from delegate.task import list_tasks as _list_tasks, format_task_id
     from delegate.review import get_current_review
     from delegate.mailbox import send as send_message, read_inbox
 
-    cfg = get_auto_approver_config(hc_home, team)
-    if not cfg["enabled"]:
+    cfg = get_reviewer_config(hc_home, team)
+    if cfg["mode"] != "ai":
         return
 
     # Collect in_approval tasks without a verdict
@@ -1375,13 +1375,15 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             tasks_data = _list_tasks(hc_home, initial_team)
             messages_data = _get_messages(hc_home, initial_team, limit=100)
 
-            from delegate.config import get_auto_approver_config, get_task_freeze_config, get_max_tasks_config
+            from delegate.config import get_reviewer_config, get_auto_approver_config, get_task_freeze_config, get_max_tasks_config
+            reviewer_cfg = get_reviewer_config(hc_home, initial_team)
             result["initial_data"] = {
                 "tasks": tasks_data,
                 "agents": agents_data,
                 "agent_stats": agent_stats,
                 "messages": messages_data,
-                "auto_approver": get_auto_approver_config(hc_home, initial_team),
+                "reviewer": reviewer_cfg,
+                "auto_approver": get_auto_approver_config(hc_home, initial_team),  # compat
                 "task_freeze": get_task_freeze_config(hc_home, initial_team),
                 "max_tasks": get_max_tasks_config(hc_home, initial_team),
             }
@@ -1398,17 +1400,38 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         """
         return _get_teams_list()
 
-    # --- Auto-approver endpoints ---
+    # --- Reviewer endpoints ---
+
+    @app.get("/teams/{team}/reviewer")
+    def get_reviewer(team: str):
+        """Return the reviewer config for a team."""
+        from delegate.config import get_reviewer_config
+        return get_reviewer_config(hc_home, team)
+
+    @app.post("/teams/{team}/reviewer")
+    def post_reviewer(team: str, body: dict):
+        """Update reviewer config (mode, threshold, model)."""
+        from delegate.config import update_reviewer_config
+        kwargs = {}
+        if "mode" in body:
+            kwargs["mode"] = str(body["mode"])
+        if "threshold" in body:
+            kwargs["threshold"] = float(body["threshold"])
+        if "model" in body:
+            kwargs["model"] = str(body["model"])
+        return update_reviewer_config(hc_home, team, **kwargs)
+
+    # --- Auto-approver endpoints (deprecated — kept for backwards compat) ---
 
     @app.get("/teams/{team}/auto-approver")
     def get_auto_approver(team: str):
-        """Return the auto-approver config for a team."""
+        """**Deprecated** — use /teams/{team}/reviewer instead."""
         from delegate.config import get_auto_approver_config
         return get_auto_approver_config(hc_home, team)
 
     @app.post("/teams/{team}/auto-approver")
     def post_auto_approver(team: str, body: dict):
-        """Update auto-approver config (enabled, threshold, model)."""
+        """**Deprecated** — use /teams/{team}/reviewer instead."""
         from delegate.config import update_auto_approver_config
         kwargs = {}
         if "enabled" in body:

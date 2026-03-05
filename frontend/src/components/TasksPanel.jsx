@@ -4,7 +4,7 @@ import { cap, prettyName, fmtStatus, taskIdStr } from "../utils.js";
 import { playTaskSound, playApprovalSound } from "../audio.js";
 import { seedTaskCache } from "./TaskSidePanel.jsx";
 import { FilterBar, applyFilters } from "./FilterBar.jsx";
-import { fetchMergeOrder, fetchAutoApprover, setAutoApprover, fetchTaskFreeze, setTaskFreeze, fetchMaxTasks, setMaxTasks } from "../api.js";
+import { fetchMergeOrder, fetchReviewer, setReviewer, fetchTaskFreeze, setTaskFreeze, fetchMaxTasks, setMaxTasks } from "../api.js";
 import { PillSelect } from "./PillSelect.jsx";
 import { CopyBtn } from "./CopyBtn.jsx";
 
@@ -32,7 +32,7 @@ export function TasksPanel() {
   const [collapsedTeams, setCollapsedTeams] = useState(new Set());
   const [mergeSort, setMergeSort] = useState(false);
   const [mergeOrder, setMergeOrder] = useState(null);
-  const [autoApprover, setAutoApproverState] = useState(false);
+  const [reviewerAI, setReviewerAI] = useState(false);
   const [taskFreezeOn, setTaskFreezeOn] = useState(false);
   const [maxTasksEnabled, setMaxTasksEnabled] = useState(false);
   const [maxTasksLimit, setMaxTasksLimit] = useState(10);
@@ -113,10 +113,10 @@ export function TasksPanel() {
     return () => { cancelled = true; };
   }, [mergeSort, team, allTasks]);
 
-  // Fetch auto-approver state on mount / team change
+  // Fetch reviewer state on mount / team change
   useEffect(() => {
     let cancelled = false;
-    fetchAutoApprover(team).then(data => { if (!cancelled) setAutoApproverState(!!data?.enabled); });
+    fetchReviewer(team).then(data => { if (!cancelled) setReviewerAI(data?.mode === "ai"); });
     return () => { cancelled = true; };
   }, [team]);
 
@@ -139,11 +139,11 @@ export function TasksPanel() {
     return () => { cancelled = true; };
   }, [team]);
 
-  const toggleAutoApprover = useCallback(() => {
-    const next = !autoApprover;
-    setAutoApproverState(next);
-    setAutoApprover(team, { enabled: next });
-  }, [autoApprover, team]);
+  const toggleReviewer = useCallback(() => {
+    const next = !reviewerAI;
+    setReviewerAI(next);
+    setReviewer(team, { mode: next ? "ai" : "human" });
+  }, [reviewerAI, team]);
 
   const toggleTaskFreeze = useCallback(() => {
     const next = !taskFreezeOn;
@@ -389,16 +389,16 @@ export function TasksPanel() {
           Merge order
         </button>
         <button
-          class={`merge-sort-toggle${autoApprover ? " active" : ""}`}
-          onClick={toggleAutoApprover}
-          title={autoApprover ? "Auto-approver is ON — AI reviews in_approval tasks" : "Enable AI auto-approver"}
+          class={`merge-sort-toggle${reviewerAI ? " active" : ""}`}
+          onClick={toggleReviewer}
+          title={reviewerAI ? "AI Review is ON — AI reviews in_approval tasks" : "Enable AI reviewer"}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
                strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="7" cy="7" r="5.5" />
             <path d="M5 7l1.5 1.5L9 5.5" />
           </svg>
-          Auto-approve
+          AI Review
         </button>
         <button
           class={`merge-sort-toggle${taskFreezeOn ? " active" : ""}`}

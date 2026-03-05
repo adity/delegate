@@ -1,4 +1,4 @@
-"""Tests for the auto-approver module."""
+"""Tests for the auto-approver / reviewer module."""
 
 from unittest.mock import patch
 import pytest
@@ -7,6 +7,11 @@ from delegate.db import get_connection
 from delegate.review import get_current_review, set_verdict
 from delegate.task import create_task, change_status, get_task
 from delegate.config import (
+    get_reviewer_config,
+    is_reviewer_ai,
+    set_reviewer_mode,
+    update_reviewer_config,
+    # Deprecated aliases (still tested for backwards compat)
     get_auto_approver_config,
     is_auto_approver_enabled,
     set_auto_approver_enabled,
@@ -56,35 +61,56 @@ BAD_SCORES = {
 
 # --- Config tests ---
 
-class TestAutoApproverConfig:
+class TestReviewerConfig:
     def test_defaults(self, team_home):
         hc_home, team = team_home
-        cfg = get_auto_approver_config(hc_home, team)
-        assert cfg["enabled"] is False
+        cfg = get_reviewer_config(hc_home, team)
+        assert cfg["mode"] == "human"
         assert cfg["threshold"] == 3.5
         assert cfg["model"] == "claude-sonnet-4-20250514"
 
-    def test_is_enabled_default_false(self, team_home):
+    def test_is_reviewer_ai_default_false(self, team_home):
         hc_home, team = team_home
-        assert is_auto_approver_enabled(hc_home, team) is False
+        assert is_reviewer_ai(hc_home, team) is False
 
-    def test_set_enabled(self, team_home):
+    def test_set_reviewer_mode(self, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
-        assert is_auto_approver_enabled(hc_home, team) is True
-        set_auto_approver_enabled(hc_home, team, False)
-        assert is_auto_approver_enabled(hc_home, team) is False
+        set_reviewer_mode(hc_home, team, "ai")
+        assert is_reviewer_ai(hc_home, team) is True
+        set_reviewer_mode(hc_home, team, "human")
+        assert is_reviewer_ai(hc_home, team) is False
 
     def test_update_config(self, team_home):
         hc_home, team = team_home
-        result = update_auto_approver_config(hc_home, team, enabled=True, threshold=4.0)
-        assert result["enabled"] is True
+        result = update_reviewer_config(hc_home, team, mode="ai", threshold=4.0)
+        assert result["mode"] == "ai"
         assert result["threshold"] == 4.0
         assert result["model"] == "claude-sonnet-4-20250514"
 
+        cfg = get_reviewer_config(hc_home, team)
+        assert cfg["mode"] == "ai"
+        assert cfg["threshold"] == 4.0
+
+    def test_legacy_auto_approver_fallback(self, team_home):
+        """Legacy auto_approver key in repos.yaml is read transparently."""
+        hc_home, team = team_home
+        from delegate.config import _read_repos, _write_repos
+        data = _read_repos(hc_home, team)
+        data["auto_approver"] = {"enabled": True, "threshold": 4.0}
+        _write_repos(hc_home, team, data)
+
+        cfg = get_reviewer_config(hc_home, team)
+        assert cfg["mode"] == "ai"
+        assert cfg["threshold"] == 4.0
+
+    def test_deprecated_aliases_still_work(self, team_home):
+        """Deprecated auto_approver functions still work as adapters."""
+        hc_home, team = team_home
+        set_reviewer_mode(hc_home, team, "ai")
+        assert is_auto_approver_enabled(hc_home, team) is True
+
         cfg = get_auto_approver_config(hc_home, team)
         assert cfg["enabled"] is True
-        assert cfg["threshold"] == 4.0
 
 
 # --- Core auto_approve_once tests ---
@@ -99,7 +125,7 @@ class TestAutoApproveOnce:
     @patch("delegate.auto_approve._get_task_diff")
     def test_approves_above_threshold(self, mock_diff, mock_judge, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         task = _make_in_approval_task(hc_home, team)
 
         mock_diff.return_value = {"_default": "diff content here"}
@@ -124,7 +150,7 @@ class TestAutoApproveOnce:
     @patch("delegate.auto_approve._get_task_diff")
     def test_rejects_below_threshold(self, mock_diff, mock_judge, mock_notify, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         task = _make_in_approval_task(hc_home, team)
 
         mock_diff.return_value = {"_default": "diff content here"}
@@ -150,7 +176,7 @@ class TestAutoApproveOnce:
     @patch("delegate.auto_approve._get_task_diff")
     def test_skips_already_reviewed(self, mock_diff, mock_judge, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         task = _make_in_approval_task(hc_home, team)
 
         # Human already approved
@@ -168,7 +194,7 @@ class TestAutoApproveOnce:
     def test_human_can_override_auto_reject(self, mock_diff, mock_judge, mock_notify, team_home):
         """After auto-reject, a human can still approve via set_verdict."""
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         task = _make_in_approval_task(hc_home, team)
 
         mock_diff.return_value = {"_default": "diff content"}
@@ -191,7 +217,7 @@ class TestAutoApproveOnce:
     @patch("delegate.auto_approve._get_task_diff")
     def test_processes_in_merge_order(self, mock_diff, mock_judge, mock_sort, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
 
         task1 = _make_in_approval_task(hc_home, team, title="First task")
         task2 = _make_in_approval_task(hc_home, team, title="Second task")
@@ -213,7 +239,7 @@ class TestAutoApproveOnce:
     @patch("delegate.auto_approve._get_task_diff")
     def test_truncates_large_diff(self, mock_diff, mock_judge, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         _make_in_approval_task(hc_home, team)
 
         large_diff = "x" * 150_000
@@ -229,7 +255,7 @@ class TestAutoApproveOnce:
 
     def test_returns_none_no_candidates(self, team_home):
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         result = auto_approve_once(hc_home, team)
         assert result is None
 
@@ -238,7 +264,7 @@ class TestAutoApproveOnce:
     def test_skips_sensitive_files(self, mock_diff, mock_judge, team_home):
         """Diffs touching sensitive files are skipped (not approved or rejected)."""
         hc_home, team = team_home
-        set_auto_approver_enabled(hc_home, team, True)
+        set_reviewer_mode(hc_home, team, "ai")
         task = _make_in_approval_task(hc_home, team)
 
         mock_diff.return_value = {

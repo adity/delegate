@@ -300,9 +300,11 @@ def add_repo(
     team: str,
     name: str,
     source: str,
-    approval: str = "manual",
+    merge_policy: str = "review-needed",
     test_cmd: str | None = None,
     remote_url: str | None = None,
+    *,
+    approval: str | None = None,
 ) -> None:
     """Register a repo for a team.
 
@@ -311,14 +313,21 @@ def add_repo(
         team: Team name.
         name: Repo name.
         source: Local path or remote URL.
-        approval: Merge approval mode — 'auto' or 'manual' (default: 'manual').
+        merge_policy: Merge policy — 'no-review' or 'review-needed' (default).
         test_cmd: Optional shell command to run tests.
         remote_url: Git remote URL (e.g. GitHub) for satellite sync.
+        approval: **Deprecated** — legacy alias for merge_policy.
+                  'auto' maps to 'no-review', 'manual' maps to 'review-needed'.
     """
+    # Legacy mapping
+    if approval is not None:
+        merge_policy = _legacy_approval_to_policy(approval)
+
     data = _read_repos(hc_home, team)
     existing = data.get(name, {})
     existing["source"] = source
-    existing["approval"] = approval
+    existing["merge_policy"] = merge_policy
+    existing.pop("approval", None)  # remove legacy key
     if test_cmd is not None:
         existing["test_cmd"] = test_cmd
     if remote_url is not None:
@@ -327,28 +336,123 @@ def add_repo(
     _write_repos(hc_home, team, data)
 
 
-def update_repo_approval(hc_home: Path, team: str, name: str, approval: str) -> None:
-    """Update the approval setting for an existing repo."""
+def _legacy_approval_to_policy(approval: str) -> str:
+    """Map legacy approval values to merge_policy values."""
+    return {"auto": "no-review", "manual": "review-needed"}.get(approval, approval)
+
+
+def _legacy_policy_to_approval(policy: str) -> str:
+    """Map merge_policy values back to legacy approval values."""
+    return {"no-review": "auto", "review-needed": "manual"}.get(policy, policy)
+
+
+def update_merge_policy(hc_home: Path, team: str, name: str, policy: str) -> None:
+    """Update the merge policy for an existing repo.
+
+    Args:
+        policy: 'no-review' or 'review-needed'.
+    """
     data = _read_repos(hc_home, team)
     if name not in data:
         raise KeyError(f"Repo '{name}' not found in team '{team}' config")
-    data[name]["approval"] = approval
+    data[name]["merge_policy"] = policy
+    data[name].pop("approval", None)  # remove legacy key on write
     _write_repos(hc_home, team, data)
 
 
-def get_repo_approval(hc_home: Path, team: str, repo_name: str) -> str:
-    """Return the approval mode for a repo ('auto' or 'manual').
+def get_merge_policy(hc_home: Path, team: str, repo_name: str) -> str:
+    """Return the merge policy for a repo ('no-review' or 'review-needed').
 
-    Defaults to 'manual' if not set or repo not found.
+    Falls back to legacy ``approval`` key if ``merge_policy`` is not set.
+    Defaults to 'review-needed' if not set or repo not found.
     """
     repos = get_repos(hc_home, team)
     meta = repos.get(repo_name, {})
-    return meta.get("approval", "manual")
+    if "merge_policy" in meta:
+        return meta["merge_policy"]
+    # Legacy fallback
+    legacy = meta.get("approval")
+    if legacy:
+        return _legacy_approval_to_policy(legacy)
+    return "review-needed"
+
+
+# Deprecated aliases — remove after one release cycle
+def update_repo_approval(hc_home: Path, team: str, name: str, approval: str) -> None:
+    """**Deprecated** — use ``update_merge_policy`` instead."""
+    update_merge_policy(hc_home, team, name, _legacy_approval_to_policy(approval))
+
+
+def get_repo_approval(hc_home: Path, team: str, repo_name: str) -> str:
+    """**Deprecated** — use ``get_merge_policy`` instead."""
+    return _legacy_policy_to_approval(get_merge_policy(hc_home, team, repo_name))
 
 
 # ---------------------------------------------------------------------------
-# Auto-approver config (per-team, stored in repos.yaml under 'auto_approver')
+# Reviewer config (per-team, stored in repos.yaml under 'reviewer')
 # ---------------------------------------------------------------------------
+
+_REVIEWER_DEFAULTS = {
+    "mode": "human",
+    "threshold": 3.5,
+    "model": "claude-sonnet-4-20250514",
+}
+
+
+def get_reviewer_config(hc_home: Path, team: str) -> dict:
+    """Return the reviewer config for a team.
+
+    Returns dict with keys: mode ('human'|'ai'), threshold (float), model (str).
+    Missing keys are filled from defaults.
+
+    Falls back to legacy ``auto_approver`` key if ``reviewer`` is not set.
+    """
+    data = _read_repos(hc_home, team)
+    if "reviewer" in data:
+        stored = data["reviewer"]
+        return {**_REVIEWER_DEFAULTS, **stored}
+    # Legacy fallback
+    legacy = data.get("auto_approver", {})
+    if legacy:
+        cfg = {**_REVIEWER_DEFAULTS}
+        cfg["mode"] = "ai" if legacy.get("enabled") else "human"
+        if "threshold" in legacy:
+            cfg["threshold"] = legacy["threshold"]
+        if "model" in legacy:
+            cfg["model"] = legacy["model"]
+        return cfg
+    return dict(_REVIEWER_DEFAULTS)
+
+
+def is_reviewer_ai(hc_home: Path, team: str) -> bool:
+    """Return True if the reviewer is set to AI mode for this team."""
+    return get_reviewer_config(hc_home, team)["mode"] == "ai"
+
+
+def set_reviewer_mode(hc_home: Path, team: str, mode: str) -> None:
+    """Set the reviewer mode ('human' or 'ai') for a team."""
+    update_reviewer_config(hc_home, team, mode=mode)
+
+
+def update_reviewer_config(hc_home: Path, team: str, **kwargs) -> dict:
+    """Update reviewer config keys (mode, threshold, model).
+
+    Removes legacy ``auto_approver`` key on write.
+    Returns the updated config dict.
+    """
+    data = _read_repos(hc_home, team)
+    # Start from current config (which handles legacy fallback)
+    current = dict(get_reviewer_config(hc_home, team))
+    for key in ("mode", "threshold", "model"):
+        if key in kwargs:
+            current[key] = kwargs[key]
+    data["reviewer"] = current
+    data.pop("auto_approver", None)  # remove legacy key on write
+    _write_repos(hc_home, team, data)
+    return dict(current)
+
+
+# Deprecated aliases — remove after one release cycle
 
 _AUTO_APPROVER_DEFAULTS = {
     "enabled": False,
@@ -358,39 +462,32 @@ _AUTO_APPROVER_DEFAULTS = {
 
 
 def get_auto_approver_config(hc_home: Path, team: str) -> dict:
-    """Return the auto-approver config for a team.
-
-    Returns dict with keys: enabled (bool), threshold (float), model (str).
-    Missing keys are filled from defaults.
-    """
-    data = _read_repos(hc_home, team)
-    stored = data.get("auto_approver", {})
-    return {**_AUTO_APPROVER_DEFAULTS, **stored}
+    """**Deprecated** — use ``get_reviewer_config`` instead."""
+    cfg = get_reviewer_config(hc_home, team)
+    return {"enabled": cfg["mode"] == "ai", "threshold": cfg["threshold"], "model": cfg["model"]}
 
 
 def is_auto_approver_enabled(hc_home: Path, team: str) -> bool:
-    """Return True if the auto-approver is enabled for this team."""
-    return get_auto_approver_config(hc_home, team)["enabled"]
+    """**Deprecated** — use ``is_reviewer_ai`` instead."""
+    return is_reviewer_ai(hc_home, team)
 
 
 def set_auto_approver_enabled(hc_home: Path, team: str, enabled: bool) -> None:
-    """Enable or disable the auto-approver for a team."""
-    update_auto_approver_config(hc_home, team, enabled=enabled)
+    """**Deprecated** — use ``set_reviewer_mode`` instead."""
+    set_reviewer_mode(hc_home, team, "ai" if enabled else "human")
 
 
 def update_auto_approver_config(hc_home: Path, team: str, **kwargs) -> dict:
-    """Update auto-approver config keys (enabled, threshold, model).
-
-    Returns the updated config dict.
-    """
-    data = _read_repos(hc_home, team)
-    current = data.get("auto_approver", {})
-    for key in ("enabled", "threshold", "model"):
-        if key in kwargs:
-            current[key] = kwargs[key]
-    data["auto_approver"] = current
-    _write_repos(hc_home, team, data)
-    return {**_AUTO_APPROVER_DEFAULTS, **current}
+    """**Deprecated** — use ``update_reviewer_config`` instead."""
+    reviewer_kwargs = {}
+    if "enabled" in kwargs:
+        reviewer_kwargs["mode"] = "ai" if kwargs["enabled"] else "human"
+    if "threshold" in kwargs:
+        reviewer_kwargs["threshold"] = kwargs["threshold"]
+    if "model" in kwargs:
+        reviewer_kwargs["model"] = kwargs["model"]
+    cfg = update_reviewer_config(hc_home, team, **reviewer_kwargs)
+    return {"enabled": cfg["mode"] == "ai", "threshold": cfg["threshold"], "model": cfg["model"]}
 
 
 # ---------------------------------------------------------------------------

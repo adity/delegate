@@ -533,6 +533,29 @@ def team_remove(ctx: click.Context, name: str, yes: bool) -> None:
     success(f"Removed team '{name}'")
 
 
+@team.command("set-reviewer")
+@click.argument("team_name")
+@click.argument("mode", type=click.Choice(["human", "ai"], case_sensitive=False))
+@click.option("--threshold", type=float, default=None, help="Score threshold for AI reviewer (default: 3.5).")
+@click.option("--model", default=None, help="Model to use for AI reviewer.")
+@click.pass_context
+def team_set_reviewer(ctx: click.Context, team_name: str, mode: str, threshold: float | None, model: str | None) -> None:
+    """Set the reviewer mode for a team.
+
+    MODE is 'human' (require human approval) or 'ai' (AI reviews diffs automatically).
+    """
+    from delegate.config import update_reviewer_config
+
+    hc_home = _get_home(ctx)
+    kwargs: dict = {"mode": mode}
+    if threshold is not None:
+        kwargs["threshold"] = threshold
+    if model is not None:
+        kwargs["model"] = model
+    cfg = update_reviewer_config(hc_home, team_name, **kwargs)
+    click.echo(f"Set reviewer for team '{team_name}': mode={cfg['mode']}, threshold={cfg['threshold']}")
+
+
 # ──────────────────────────────────────────────────────────────
 # delegate agent add
 # ──────────────────────────────────────────────────────────────
@@ -756,10 +779,17 @@ def repo() -> None:
 @click.argument("path_or_url")
 @click.option("--name", "repo_name", default=None, help="Name for the repo (default: derived from path/URL).")
 @click.option(
+    "--merge-policy",
+    type=click.Choice(["no-review", "review-needed"], case_sensitive=False),
+    default=None,
+    help="Merge policy: 'no-review' (skip review) or 'review-needed' (require approval). Default: review-needed.",
+)
+@click.option(
     "--approval",
     type=click.Choice(["auto", "manual"], case_sensitive=False),
     default=None,
-    help="Merge approval mode: 'auto' (merge when QA approves) or 'manual' (require human approval). Default: manual.",
+    hidden=True,
+    help="Deprecated — use --merge-policy instead.",
 )
 @click.option(
     "--test-cmd",
@@ -767,7 +797,7 @@ def repo() -> None:
     help="Shell command to run tests (e.g. '/path/to/.venv/bin/python -m pytest -x -q').",
 )
 @click.pass_context
-def repo_add(ctx: click.Context, team_name: str, path_or_url: str, repo_name: str | None, approval: str | None, test_cmd: str | None) -> None:
+def repo_add(ctx: click.Context, team_name: str, path_or_url: str, repo_name: str | None, merge_policy: str | None, approval: str | None, test_cmd: str | None) -> None:
     """Register a repository for a team.
 
     TEAM_NAME is the team this repo belongs to.
@@ -776,7 +806,7 @@ def repo_add(ctx: click.Context, team_name: str, path_or_url: str, repo_name: st
     from delegate.repo import register_repo
 
     hc_home = _get_home(ctx)
-    name = register_repo(hc_home, team_name, path_or_url, name=repo_name, approval=approval, test_cmd=test_cmd)
+    name = register_repo(hc_home, team_name, path_or_url, name=repo_name, merge_policy=merge_policy, approval=approval, test_cmd=test_cmd)
     click.echo(f"Registered repo '{name}' for team '{team_name}'")
 
 
@@ -796,6 +826,39 @@ def repo_list(ctx: click.Context, team_name: str) -> None:
     click.echo(f"Repos for team '{team_name}':")
     for name, meta in repos.items():
         click.echo(f"  - {name}: {meta.get('source', '?')}")
+
+
+@repo.command("set-merge-policy")
+@click.argument("team_name")
+@click.argument("repo_name")
+@click.argument("policy", type=click.Choice(["no-review", "review-needed"], case_sensitive=False))
+@click.pass_context
+def repo_set_merge_policy(ctx: click.Context, team_name: str, repo_name: str, policy: str) -> None:
+    """Set the merge policy for a repo.
+
+    POLICY is 'no-review' (skip review, merge when tests pass)
+    or 'review-needed' (require human/AI approval before merge).
+    """
+    from delegate.config import update_merge_policy
+
+    hc_home = _get_home(ctx)
+    update_merge_policy(hc_home, team_name, repo_name, policy)
+    click.echo(f"Set merge policy for '{repo_name}' to '{policy}'")
+
+
+@repo.command("set-approval", hidden=True)
+@click.argument("team_name")
+@click.argument("repo_name")
+@click.argument("approval", type=click.Choice(["auto", "manual"], case_sensitive=False))
+@click.pass_context
+def repo_set_approval(ctx: click.Context, team_name: str, repo_name: str, approval: str) -> None:
+    """Deprecated — use 'set-merge-policy' instead."""
+    from delegate.config import update_merge_policy, _legacy_approval_to_policy
+
+    hc_home = _get_home(ctx)
+    policy = _legacy_approval_to_policy(approval)
+    update_merge_policy(hc_home, team_name, repo_name, policy)
+    click.echo(f"Set merge policy for '{repo_name}' to '{policy}'")
 
 
 # ──────────────────────────────────────────────────────────────

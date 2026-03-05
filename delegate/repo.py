@@ -27,7 +27,7 @@ from delegate.paths import repos_dir as _repos_dir, repo_path as _repo_path, tas
 from delegate.config import (
     add_repo as _config_add_repo,
     get_repos as _config_get_repos,
-    update_repo_approval as _config_update_approval,
+    update_merge_policy as _config_update_merge_policy,
     update_repo_test_cmd as _config_update_test_cmd,
 )
 
@@ -107,9 +107,11 @@ def register_repo(
     team: str,
     source: str,
     name: str | None = None,
-    approval: str | None = None,
+    merge_policy: str | None = None,
     test_cmd: str | None = None,
     remote_url: str | None = None,
+    *,
+    approval: str | None = None,
 ) -> str:
     """Register a local repository for a team.
 
@@ -118,10 +120,11 @@ def register_repo(
         team: Team name.
         source: Local path to the repository root (must contain .git/).
         name: Name for the repo (default: derived from source).
-        approval: Merge approval mode — 'auto' or 'manual'.
-                  Defaults to 'manual' for new repos.
+        merge_policy: Merge policy — 'no-review' or 'review-needed'.
+                      Defaults to 'review-needed' for new repos.
         test_cmd: Optional shell command to run tests.
         remote_url: Git remote URL for satellite sync (auto-detected if not provided).
+        approval: **Deprecated** — legacy alias for merge_policy.
 
     Returns:
         The name used for the repo.
@@ -130,6 +133,10 @@ def register_repo(
         FileNotFoundError: If the source path doesn't exist or has no .git/.
         ValueError: If the source is a remote URL (not supported).
     """
+    # Legacy mapping
+    if approval is not None and merge_policy is None:
+        from delegate.config import _legacy_approval_to_policy
+        merge_policy = _legacy_approval_to_policy(approval)
     # Reject remote URLs
     if source.startswith(("http://", "https://", "git@", "ssh://")):
         raise ValueError(
@@ -164,10 +171,10 @@ def register_repo(
         else:
             logger.info("Repo '%s' already registered at %s", name, source_path)
 
-        # Update approval setting if explicitly provided
-        if approval is not None:
-            _config_update_approval(hc_home, team, name, approval)
-            logger.info("Updated approval for '%s' to '%s'", name, approval)
+        # Update merge_policy setting if explicitly provided
+        if merge_policy is not None:
+            _config_update_merge_policy(hc_home, team, name, merge_policy)
+            logger.info("Updated merge_policy for '%s' to '%s'", name, merge_policy)
 
         # Update test_cmd setting if explicitly provided
         if test_cmd is not None:
@@ -179,8 +186,8 @@ def register_repo(
         link_path.symlink_to(source_path)
         logger.info("Created symlink %s -> %s", link_path, source_path)
 
-        # Register in team config (new repo — default approval to 'manual')
-        _config_add_repo(hc_home, team, name, str(source_path), approval=approval or "manual", test_cmd=test_cmd)
+        # Register in team config (new repo — default merge_policy to 'review-needed')
+        _config_add_repo(hc_home, team, name, str(source_path), merge_policy=merge_policy or "review-needed", test_cmd=test_cmd)
 
     # Auto-detect remote_url if not explicitly provided
     if remote_url is None:

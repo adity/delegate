@@ -61,7 +61,7 @@ import time
 import uuid
 from pathlib import Path
 
-from delegate.config import get_repo_approval
+from delegate.config import get_merge_policy
 from delegate.notify import notify_conflict
 from delegate.review import get_current_review
 from delegate.task import (
@@ -1261,24 +1261,24 @@ def merge_once(
         if not repos:
             continue
 
-        approval_mode = get_repo_approval(hc_home, team, repos[0])
+        merge_policy = get_merge_policy(hc_home, team, repos[0])
 
         ready = False
-        if approval_mode == "auto":
+        if merge_policy == "no-review":
             ready = True
-        elif approval_mode == "manual":
+        elif merge_policy == "review-needed":
             review = get_current_review(hc_home, team, task_id)
             if review and review.get("verdict") == "approved":
                 ready = True
             else:
                 logger.debug(
-                    "%s: needs human approval (verdict=%s)",
+                    "%s: needs review (verdict=%s)",
                     task_id, review.get("verdict") if review else "no review",
                 )
         else:
             logger.warning(
-                "%s: unknown approval mode '%s' for repos %s",
-                task_id, approval_mode, repos,
+                "%s: unknown merge_policy '%s' for repos %s",
+                task_id, merge_policy, repos,
             )
 
         if not ready:

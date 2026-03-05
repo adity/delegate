@@ -236,22 +236,58 @@ delegate network disallow example.com             # Remove a domain
 delegate network reset                            # Restore curated defaults
 ```
 
-### Auto Approval
+### Merge Policy & Reviewer
 
 By default, Delegate expects you to do a final code review and give explicit
-approval before merging into your local repo's main. You can enable auto-approval
-in two ways:
+approval before merging into your local repo's main. There are two ways to
+automate this step — they work differently and offer different safety guarantees:
 
-**Option 1: Reviewer agent (recommended).** Add a reviewer agent to your team:
+**Option 1: AI Reviewer (recommended).** Add a reviewer agent and set the reviewer to AI mode:
 ```bash
+# 1. Add a reviewer agent to the team
 delegate agent add myteam reviewer --role reviewer
-```
-Then enable the Auto-approve toggle in the Tasks panel UI. When tasks reach `in_approval`, the reviewer agent evaluates diffs using MCP tools (`task_diff`, `task_approve`, `task_reject`), checks for sensitive files, and approves or rejects automatically. Sensitive files (CI configs, secrets, agent instructions) are escalated to you for human review.
 
-**Option 2: Repo-level auto-approval.** For simpler setups without a reviewer agent:
-```bash
-delegate repo set-approval myteam my-repo auto
+# 2. Enable via the "AI Review" toggle in the Tasks panel UI
+#    Or via CLI:
+delegate team set-reviewer myteam ai
+
+# Or via the API:
+curl -X POST localhost:3548/teams/myteam/reviewer \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "ai"}'
+
+# Optional: adjust the score threshold (default: 3.5 out of 5)
+delegate team set-reviewer myteam ai --threshold 4.0
 ```
+When tasks reach `in_approval`, the reviewer agent evaluates diffs using MCP
+tools (`task_diff`, `task_approve`, `task_reject`), scores code on correctness,
+readability, style, test quality, and simplicity, and approves only if the
+average score meets the configured threshold. Sensitive files (CI configs,
+secrets, agent instructions) are never auto-approved — they are escalated to you
+for human review. If the score falls below the threshold, the task is rejected
+and the manager is notified.
+
+**Option 2: No-review merge policy.** For simpler setups without a reviewer agent:
+```bash
+delegate repo set-merge-policy myteam my-repo no-review
+
+# To switch back to requiring review:
+delegate repo set-merge-policy myteam my-repo review-needed
+```
+
+#### How they differ
+
+| | AI Reviewer (Option 1) | No-review merge policy (Option 2) |
+|---|---|---|
+| **Reviews the diff?** | Yes — LLM scores on 5 quality dimensions | No — skips review entirely |
+| **Can reject bad code?** | Yes — rejects if score is below threshold | No — everything merges if tests pass |
+| **Sensitive file checks?** | Yes — blocks and escalates to human | No |
+| **Quality gate** | AI code review + pre-merge tests | Pre-merge tests only |
+| **How it works** | Sets a verdict (`approved`/`rejected`), merge worker checks the verdict before proceeding | Merge worker sees `merge_policy: no-review` and marks the task ready immediately — no verdict needed |
+
+In short: the AI reviewer is an **automated reviewer** that reads the diff and
+decides whether it's good enough. No-review is a **bypass** that skips the
+approval step entirely and merges anything that passes tests.
 
 ## How it works
 

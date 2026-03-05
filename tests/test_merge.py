@@ -27,7 +27,7 @@ from delegate.task import (
     get_task,
 )
 from delegate.config import (
-    add_repo, get_repo_approval, get_repo_test_cmd, update_repo_test_cmd, set_boss,
+    add_repo, get_merge_policy, get_repo_approval, get_repo_test_cmd, update_repo_test_cmd, set_boss,
 )
 from delegate.merge import merge_task, merge_once, _run_pre_merge, _other_unmerged_tasks_on_branch, _sort_merge_candidates, MergeResult, MergeFailureReason
 from delegate.bootstrap import bootstrap
@@ -736,15 +736,15 @@ class TestMergeOnce:
         results = merge_once(hc_home, SAMPLE_TEAM)
         assert results == []
 
-    def test_skips_manual_unapproved(self, hc_home):
-        """Manual approval tasks without approval_status='approved' are skipped."""
-        add_repo(hc_home, SAMPLE_TEAM, "myrepo", "/fake", approval="manual")
+    def test_skips_review_needed_unapproved(self, hc_home):
+        """review-needed tasks without approval are skipped."""
+        add_repo(hc_home, SAMPLE_TEAM, "myrepo", "/fake", merge_policy="review-needed")
         _make_in_approval_task(hc_home, title="Unapproved")
         results = merge_once(hc_home, SAMPLE_TEAM)
         assert results == []
 
-    def test_auto_merge_processes(self, hc_home, tmp_path):
-        """Auto approval tasks should be processed without boss approval."""
+    def test_no_review_merge_processes(self, hc_home, tmp_path):
+        """no-review tasks should be processed without approval."""
         repo = _setup_git_repo(tmp_path)
         _make_feature_branch(repo, "alice/T0001")
         _register_repo_with_symlink(hc_home, "myrepo", repo)
@@ -755,8 +755,8 @@ class TestMergeOnce:
         assert len(results) == 1
         assert results[0].success is True
 
-    def test_manual_approved_processes(self, hc_home, tmp_path):
-        """Manual tasks with an approved review should be processed."""
+    def test_review_needed_approved_processes(self, hc_home, tmp_path):
+        """review-needed tasks with an approved review should be processed."""
         repo = _setup_git_repo(tmp_path)
         _make_feature_branch(repo, "alice/T0001")
 
@@ -765,7 +765,7 @@ class TestMergeOnce:
         rd = repos_dir(hc_home, SAMPLE_TEAM)
         rd.mkdir(parents=True, exist_ok=True)
         (rd / "myrepo").symlink_to(repo)
-        add_repo(hc_home, SAMPLE_TEAM, "myrepo", str(repo), approval="manual")
+        add_repo(hc_home, SAMPLE_TEAM, "myrepo", str(repo), merge_policy="review-needed")
 
         task = _make_in_approval_task(hc_home, repo="myrepo", branch="alice/T0001")
         # Approve via the reviews table (not the deprecated approval_status field)
@@ -807,20 +807,34 @@ class TestMergeOnce:
 
 
 # ---------------------------------------------------------------------------
-# get_repo_approval tests
+# get_merge_policy tests
 # ---------------------------------------------------------------------------
 
-class TestGetRepoApproval:
-    def test_returns_manual_by_default(self, hc_home):
-        assert get_repo_approval(hc_home, SAMPLE_TEAM, "nonexistent") == "manual"
+class TestGetMergePolicy:
+    def test_returns_review_needed_by_default(self, hc_home):
+        assert get_merge_policy(hc_home, SAMPLE_TEAM, "nonexistent") == "review-needed"
 
     def test_reads_from_config(self, hc_home):
-        add_repo(hc_home, SAMPLE_TEAM, "myrepo", "/tmp/repo", approval="auto")
-        add_repo(hc_home, SAMPLE_TEAM, "other", "/tmp/other", approval="manual")
+        add_repo(hc_home, SAMPLE_TEAM, "myrepo", "/tmp/repo", merge_policy="no-review")
+        add_repo(hc_home, SAMPLE_TEAM, "other", "/tmp/other", merge_policy="review-needed")
 
+        assert get_merge_policy(hc_home, SAMPLE_TEAM, "myrepo") == "no-review"
+        assert get_merge_policy(hc_home, SAMPLE_TEAM, "other") == "review-needed"
+        assert get_merge_policy(hc_home, SAMPLE_TEAM, "missing") == "review-needed"
+
+    def test_legacy_approval_fallback(self, hc_home):
+        """Legacy 'approval' key in repos.yaml is read transparently."""
+        from delegate.config import _read_repos, _write_repos
+        data = _read_repos(hc_home, SAMPLE_TEAM)
+        data["legacy_repo"] = {"source": "/tmp/legacy", "approval": "auto"}
+        _write_repos(hc_home, SAMPLE_TEAM, data)
+
+        assert get_merge_policy(hc_home, SAMPLE_TEAM, "legacy_repo") == "no-review"
+
+    def test_deprecated_alias_still_works(self, hc_home):
+        """The deprecated get_repo_approval function still works."""
+        add_repo(hc_home, SAMPLE_TEAM, "myrepo", "/tmp/repo", merge_policy="no-review")
         assert get_repo_approval(hc_home, SAMPLE_TEAM, "myrepo") == "auto"
-        assert get_repo_approval(hc_home, SAMPLE_TEAM, "other") == "manual"
-        assert get_repo_approval(hc_home, SAMPLE_TEAM, "missing") == "manual"
 
 
 # ---------------------------------------------------------------------------
