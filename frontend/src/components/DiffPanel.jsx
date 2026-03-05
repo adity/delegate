@@ -495,7 +495,7 @@ function panelTitle(entry, allTasks) {
   if (!entry) return "";
   if (entry.type === "task") {
     const t = (allTasks || []).find(t => t.id === entry.target);
-    return "T" + String(entry.target).padStart(4, "0") + (t ? " " + t.title : "");
+    return taskIdStr(entry.target) + (t ? " " + t.title : "");
   }
   if (entry.type === "agent") return cap(entry.target || "");
   if (entry.type === "file") return (entry.target || "").split("/").pop() || "File";
@@ -584,7 +584,7 @@ export function DiffPanel() {
           </div>
         )}
         <div class="diff-panel-header">
-          {mode === "diff" && <div class="diff-panel-title">{"T" + String(target).padStart(4, "0")}</div>}
+          {mode === "diff" && <div class="diff-panel-title">{taskIdStr(target)}</div>}
           {mode === "agent" && (
             <div class="diff-panel-title diff-panel-title-agent">
               <span>{cap(target || "")}</span>

@@ -8,7 +8,7 @@ import {
 import * as api from "../api.js";
 import {
   cap, prettyName, esc, fmtStatus, fmtTimestamp, fmtElapsed, fmtTokens, fmtCost,
-  fmtRelativeTime, taskIdStr, renderMarkdown, linkifyTaskRefs, linkifyFilePaths,
+  fmtRelativeTime, taskIdStr, registerTaskDisplayIds, renderMarkdown, linkifyTaskRefs, linkifyFilePaths,
   agentifyRefs, flattenDiffDict, flattenCommitsDict, diff2HtmlRender, diff2HtmlParse,
   stripEmojis, handleCopyClick, toApiPath, fmtCompactDuration, displayName,
 } from "../utils.js";
@@ -165,6 +165,7 @@ function RetryMergeButton({ task }) {
       // Refresh task list - task.team is available if needed
       if (task.team) {
         const refreshed = await api.fetchTasks(task.team);
+        registerTaskDisplayIds(refreshed);
         tasks.value = refreshed;
       }
     } catch (err) {
@@ -1230,11 +1231,11 @@ export function TaskSidePanel() {
   const handleAction = useCallback(() => {
     const filter = taskTeamFilter.value;
     if (filter === "all") {
-      api.fetchAllTasks().then(list => { tasks.value = list; });
+      api.fetchAllTasks().then(list => { registerTaskDisplayIds(list); tasks.value = list; });
     } else if (filter === "current") {
-      api.fetchTasks(currentTeam.value).then(list => { tasks.value = list; });
+      api.fetchTasks(currentTeam.value).then(list => { registerTaskDisplayIds(list); tasks.value = list; });
     } else if (task && task.team) {
-      api.fetchTasks(task.team).then(list => { tasks.value = list; });
+      api.fetchTasks(task.team).then(list => { registerTaskDisplayIds(list); tasks.value = list; });
     }
   }, [task]);
 

@@ -18,7 +18,7 @@ import {
   msgStatusUpdate,
 } from "./state.js";
 import * as api from "./api.js";
-import { cap, prettyName } from "./utils.js";
+import { cap, prettyName, registerTaskDisplayIds, taskIdStr } from "./utils.js";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { ChatPanel } from "./components/ChatPanel.jsx";
 import { TasksPanel } from "./components/TasksPanel.jsx";
@@ -297,6 +297,7 @@ function App() {
         bootstrapTeamRef.current = initial;  // mark so team-switch effect skips fetch
         batch(() => {
           tasks.value = d.tasks || [];
+          registerTaskDisplayIds(tasks.value);
           agents.value = d.agents || [];
           agentStatsMap.value = d.agent_stats || {};
           knownAgentNames.value = (d.agents || []).map(a => a.name);
@@ -360,6 +361,7 @@ function App() {
         }
 
         if (active && t === currentTeam.value && filter === taskTeamFilter.value) {
+          registerTaskDisplayIds(taskData);
           batch(() => {
             tasks.value = taskData;
             agents.value = agentData;
@@ -448,6 +450,7 @@ function App() {
         ]);
         // Guard: only apply if the team hasn't changed while we were fetching
         if (t !== currentTeam.value) return;
+        registerTaskDisplayIds(taskData);
         batch(() => {
           tasks.value = taskData;
           agents.value = agentData;
@@ -697,6 +700,7 @@ function App() {
             if (entry.assignee !== undefined) updated.assignee = entry.assignee;
             const next = [...cur];
             next[idx] = updated;
+            registerTaskDisplayIds([updated]);
             tasks.value = next;
 
             // Invalidate task panel cache so reopening shows fresh data
@@ -708,7 +712,7 @@ function App() {
 
             if (entry.assignee && entry.assignee.toLowerCase() === human.toLowerCase() &&
                 (entry.status === "in_approval" || entry.status === "merge_failed")) {
-              const title = `T${String(tid).padStart(4, "0")} "${task.title}"`;
+              const title = `${taskIdStr(tid)} "${task.title}"`;
               const body = entry.status === "in_approval"
                 ? "Needs your approval"
                 : "Merge failed -- needs resolution";
@@ -716,7 +720,7 @@ function App() {
             }
 
             if (entry.status === "done") {
-              const title = `T${String(tid).padStart(4, "0")} "${task.title}"`;
+              const title = `${taskIdStr(tid)} "${task.title}"`;
               const body = "Merged successfully";
               showActionToast({ title, body, taskId: tid, type: "success" });
             }

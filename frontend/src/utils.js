@@ -362,8 +362,23 @@ export function taskTier(t) {
   return 2;
 }
 
+// Cache of task id -> display string (e.g. "RANA-0124").
+// Populated by registerTaskDisplayIds() whenever task lists are loaded.
+const _taskDisplayCache = new Map();
+
+export function registerTaskDisplayIds(taskList) {
+  if (!Array.isArray(taskList)) return;
+  for (const t of taskList) {
+    if (t.prefix && t.seq) {
+      _taskDisplayCache.set(t.id, t.prefix + "-" + String(t.seq).padStart(4, "0"));
+    }
+  }
+}
+
 export function taskIdStr(id, prefix, seq) {
   if (prefix && seq) return prefix + "-" + String(seq).padStart(4, "0");
+  const cached = _taskDisplayCache.get(id);
+  if (cached) return cached;
   return "T" + String(id).padStart(4, "0");
 }
 
