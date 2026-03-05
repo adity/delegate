@@ -268,14 +268,21 @@ export function formatToolDetail(toolName, detail) {
 
 // ── Linkify helpers (produce HTML strings for dangerouslySetInnerHTML) ──
 export function linkifyTaskRefs(html) {
-  return html.replace(/(^[^<]+|>[^<]*)/g, match =>
-    match.replace(/(?<!\/)T(\d{4})\b/g, (full, digits) => {
+  return html.replace(/(^[^<]+|>[^<]*)/g, match => {
+    // Match per-project display IDs: PREFIX-NNNN (e.g. POLY-0001)
+    let result = match.replace(/\b([A-Z]{2,4})-(\d{4})\b/g, (full, prefix, digits) => {
+      const seq = parseInt(digits, 10);
+      if (seq === 0) return full;
+      return '<span class="task-link copyable" data-task-seq="' + full + '">' + full + copyBtnHtml(full) + "</span>";
+    });
+    // Match legacy T0001 format
+    result = result.replace(/(?<!\/)T(\d{4})\b/g, (full, digits) => {
       const id = parseInt(digits, 10);
-      // Skip T0000 (system placeholder)
       if (id === 0) return full;
       return '<span class="task-link copyable" data-task-id="' + id + '">' + full + copyBtnHtml(full) + "</span>";
-    })
-  );
+    });
+    return result;
+  });
 }
 
 /**
@@ -355,7 +362,8 @@ export function taskTier(t) {
   return 2;
 }
 
-export function taskIdStr(id) {
+export function taskIdStr(id, prefix, seq) {
+  if (prefix && seq) return prefix + "-" + String(seq).padStart(4, "0");
   return "T" + String(id).padStart(4, "0");
 }
 

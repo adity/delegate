@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "preact/hooks";
 import { memo, forwardRef } from "preact/compat";
 import {
-  currentTeam, messages, agents, activeTab,
+  currentTeam, messages, agents, activeTab, tasks,
   openPanel,
   knownAgentNames, isMuted, humanName,
   commandMode, commandCwd, teams, navigate,
@@ -141,6 +141,14 @@ const LinkedDiv = forwardRef(function LinkedDiv({ html, class: cls, style }, ref
     if (taskLink) {
       e.stopPropagation();
       openPanel("task", parseInt(taskLink.dataset.taskId, 10));
+      return;
+    }
+    const taskSeqLink = e.target.closest("[data-task-seq]");
+    if (taskSeqLink) {
+      e.stopPropagation();
+      const displayId = taskSeqLink.dataset.taskSeq;
+      const match = (tasks.peek() || []).find(t => t.display_id === displayId);
+      if (match) openPanel("task", match.id);
       return;
     }
     const agentLink = e.target.closest("[data-agent-name]");

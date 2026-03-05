@@ -504,7 +504,7 @@ export function TasksPanel() {
                             onClick={() => { seedTaskCache(t.id, t); openPanel("task", t.id); }}
                           >
                             <div class="task-summary">
-                              <span class="task-id copyable">{taskIdStr(t.id)}<CopyBtn text={taskIdStr(t.id)} /></span>
+                              <span class="task-id copyable">{taskIdStr(t.id, t.prefix, t.seq)}<CopyBtn text={taskIdStr(t.id, t.prefix, t.seq)} /></span>
                               <span class="task-title">{t.title}</span>
                               <span><span class={"badge badge-" + t.status}>{fmtStatus(t.status)}</span></span>
                               <span class="task-assignee">{t.assignee ? cap(t.assignee) : "\u2014"}</span>
@@ -528,7 +528,7 @@ export function TasksPanel() {
                 onClick={() => { seedTaskCache(t.id, t); openPanel("task", t.id); }}
               >
                 <div class="task-summary">
-                  <span class="task-id copyable">{taskIdStr(t.id)}<CopyBtn text={taskIdStr(t.id)} /></span>
+                  <span class="task-id copyable">{taskIdStr(t.id, t.prefix, t.seq)}<CopyBtn text={taskIdStr(t.id, t.prefix, t.seq)} /></span>
                   <span class="task-title">{t.title}</span>
                   <span><span class={"badge badge-" + t.status}>{fmtStatus(t.status)}</span></span>
                   <span class="task-assignee">{t.assignee ? cap(t.assignee) : "\u2014"}</span>

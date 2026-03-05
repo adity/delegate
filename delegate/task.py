@@ -29,6 +29,10 @@ from delegate.paths import resolve_team_uuid as _team
 
 _log = logging.getLogger(__name__)
 
+# Cache of task_id -> display_id (e.g. "POLY-0001").
+# Populated by db.task_row_to_dict whenever a task row is loaded.
+_display_cache: dict[int, str] = {}
+
 
 def _broadcast_update(task_id: int, team: str, changes: dict) -> None:
     """Best-effort SSE broadcast of a task mutation."""
@@ -65,15 +69,31 @@ _TASK_FIELDS = frozenset({
     "rejection_reason", "approval_status", "merge_base", "merge_tip",
     "attachments", "review_attempt", "status_detail", "merge_attempts",
     "workflow", "workflow_version", "metadata", "retry_after",
+    "seq", "display_id",
 })
 
 
-def format_task_id(task_id: int) -> str:
-    """Format a task ID as ``T`` followed by zero-padded digits.
+def _derive_prefix(name: str) -> str:
+    """Derive a 4-char uppercase prefix from a project/team name.
 
-    Always uses at least 4 digits, but automatically widens
-    for IDs >= 10000 (e.g. ``T10000``).
+    Strips hyphens and underscores, takes first 4 chars, uppercases.
+    E.g. ``"poly-repo"`` → ``"POLY"``, ``"q4_launch"`` → ``"Q4LA"``.
     """
+    stripped = name.replace("-", "").replace("_", "")
+    return stripped[:4].upper()
+
+
+def format_task_id(task_id: int) -> str:
+    """Return the per-project display ID (e.g. ``POLY-0001``) if cached,
+    otherwise fall back to the legacy ``T`` format (``T0001``).
+
+    The cache is populated automatically by ``task_row_to_dict`` every
+    time a task row is loaded from the database, so callers never need
+    to change.
+    """
+    cached = _display_cache.get(task_id)
+    if cached:
+        return cached
     return f"T{task_id:04d}"
 
 
@@ -139,6 +159,12 @@ def create_task(
     team_uuid = _team(hc_home, team)
     conn = get_connection(hc_home, team)
     try:
+        # Look up prefix for this project
+        prefix_row = conn.execute(
+            "SELECT prefix FROM project_ids WHERE uuid = ?", (team_uuid,)
+        ).fetchone()
+        prefix = prefix_row[0] if prefix_row and prefix_row[0] else _derive_prefix(team)
+
         cursor = conn.execute(
             """\
             INSERT INTO tasks (
@@ -147,14 +173,17 @@ def create_task(
                 created_at, updated_at, completed_at,
                 depends_on, branch, base_sha, commits,
                 rejection_reason, approval_status, merge_base, merge_tip, team,
-                workflow, workflow_version, metadata, project_uuid
+                workflow, workflow_version, metadata, project_uuid,
+                seq, display_id
             ) VALUES (
                 ?, ?, 'todo', ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, '',
                 ?, '', '{}', '{}',
                 '', '', '{}', '{}', ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?,
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM tasks WHERE project_uuid = ?),
+                ''
             )""",
             (
                 title, description, assignee, assignee,
@@ -167,10 +196,17 @@ def create_task(
                 workflow_name, workflow_version,
                 json.dumps(metadata or {}),
                 team_uuid,  # UUID in 'project_uuid' column
+                team_uuid,  # for the seq subquery
             ),
         )
-        conn.commit()
         task_id = cursor.lastrowid
+
+        # Read back the seq that was computed by the subquery, build display_id
+        seq_row = conn.execute("SELECT seq FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        seq = seq_row[0] if seq_row else 1
+        display_id = f"{prefix}-{seq:04d}"
+        conn.execute("UPDATE tasks SET display_id = ? WHERE id = ?", (display_id, task_id))
+        conn.commit()
 
         # Read back the full row to return
         row = conn.execute("SELECT * FROM tasks WHERE project_uuid = ? AND id = ?", (team_uuid, task_id)).fetchone()

@@ -117,7 +117,7 @@ function panelTitle(entry, allTasks) {
   if (!entry) return "";
   if (entry.type === "task") {
     const t = (allTasks || []).find(t => t.id === entry.target);
-    return taskIdStr(entry.target) + (t ? " " + t.title : "");
+    return taskIdStr(entry.target, t && t.prefix, t && t.seq) + (t ? " " + t.title : "");
   }
   if (entry.type === "agent") return cap(entry.target || "");
   if (entry.type === "file") return (entry.target || "").split("/").pop() || "File";
@@ -136,6 +136,14 @@ const LinkedDiv = forwardRef(function LinkedDiv({ html, class: cls, style }, ref
     if (copyBtn) { e.stopPropagation(); e.preventDefault(); handleCopyClick(copyBtn); return; }
     const taskLink = e.target.closest("[data-task-id]");
     if (taskLink) { e.stopPropagation(); pushPanel("task", parseInt(taskLink.dataset.taskId, 10)); return; }
+    const taskSeqLink = e.target.closest("[data-task-seq]");
+    if (taskSeqLink) {
+      e.stopPropagation();
+      const displayId = taskSeqLink.dataset.taskSeq;
+      const match = (tasks.peek() || []).find(t => t.display_id === displayId);
+      if (match) pushPanel("task", match.id);
+      return;
+    }
     const agentLink = e.target.closest("[data-agent-name]");
     if (agentLink) { e.stopPropagation(); pushPanel("agent", agentLink.dataset.agentName); return; }
     const fileLink = e.target.closest("[data-file-path]");
@@ -1294,8 +1302,8 @@ export function TaskSidePanel() {
         <div class="task-panel-header">
           <div class="task-panel-header-line-1">
             <span class="task-panel-id copyable">
-              {taskIdStr(id)}
-              <CopyBtn text={taskIdStr(id)} />
+              {taskIdStr(id, t && t.prefix, t && t.seq)}
+              <CopyBtn text={taskIdStr(id, t && t.prefix, t && t.seq)} />
             </span>
             {taskTeamFilter.peek() === "all" && t && t.team && (
               <span class="task-team-name">{prettyName(t.team)}</span>

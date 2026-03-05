@@ -736,4 +736,11 @@ def task_row_to_dict(row: sqlite3.Row) -> dict:
     # commits values are lists of strings keyed by repo
     if d.get("commits"):
         d["commits"] = {str(k): [str(v) for v in vs] for k, vs in d["commits"].items()}
+
+    # Populate the format_task_id display cache so callers auto-get
+    # per-project IDs (e.g. "POLY-0001") without any code changes.
+    if d.get("display_id"):
+        from delegate.task import _display_cache
+        _display_cache[d["id"]] = d["display_id"]
+
     return d

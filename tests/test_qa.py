@@ -147,6 +147,21 @@ class TestExtractTaskIdFromBranch:
         # Legacy format: delegate/<team>/T<NNN>
         assert _extract_task_id_from_branch("delegate/myteam/T0042") == 42
 
+    def test_display_id_branch_format(self, qa_team):
+        """Convention: delegate/<team_id>/<team>/PREFIX-NNNN."""
+        hc_home, _ = qa_team
+        # Create a task so we have a display_id to look up
+        task = create_task(hc_home, TEAM, title="Test display_id", assignee="alice")
+        display_id = task["display_id"]
+        branch = f"delegate/abc123/{TEAM}/{display_id}"
+        result = _extract_task_id_from_branch(branch, hc_home, TEAM)
+        assert result == task["id"]
+
+    def test_display_id_branch_no_db_returns_none(self):
+        """PREFIX-NNNN branch without DB context returns None."""
+        result = _extract_task_id_from_branch("delegate/abc123/myteam/POLY-0001")
+        assert result is None
+
 
 class TestParseReviewRequest:
     def test_valid_request(self):
