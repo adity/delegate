@@ -433,3 +433,155 @@ class TestWorkflowErrorRecovery:
         assignee = error_stage.assign(ctx)
 
         assert assignee == "nikhil", "Error.assign() should return human name"
+
+
+# ---------------------------------------------------------------------------
+# Research workflow tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def research_home(tmp_path):
+    """Bootstrapped home with both default and research workflows registered."""
+    hc = tmp_path / "hc_home"
+    hc.mkdir()
+    set_boss(hc, "nikhil")
+    bootstrap(hc, TEAM, manager="edison", agents=["alice", "bob"])
+
+    # Add a researcher agent
+    from delegate.bootstrap import add_agent
+    add_agent(hc, TEAM, "rosalind", role="researcher")
+
+    # Register both workflows
+    from delegate.workflow import register_workflow
+    wf_default = Path(__file__).parent.parent / "delegate" / "workflows" / "default.py"
+    wf_research = Path(__file__).parent.parent / "delegate" / "workflows" / "research.py"
+    register_workflow(hc, TEAM, wf_default)
+    register_workflow(hc, TEAM, wf_research)
+
+    return hc
+
+
+class TestResearchWorkflowHappyPath:
+    """Research workflow: todo -> researching -> reporting -> done."""
+
+    def test_full_research_lifecycle(self, research_home, tmp_path):
+        """Drive a research task through its lifecycle."""
+        repo = _setup_git_repo(tmp_path)
+        _register_repo(research_home, "testrepo", repo)
+
+        # Create task with research workflow
+        task = create_task(
+            research_home, TEAM,
+            title="Optimize val_bpb",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+        )
+        assert task["status"] == "todo"
+        assert task["workflow"] == "research"
+
+        # todo -> researching (should create worktree and assign to researcher)
+        task = change_status(research_home, TEAM, task["id"], "researching")
+        assert task["status"] == "researching"
+        assert task["assignee"] == "rosalind"
+
+        # Verify worktree was created
+        from delegate.paths import task_worktree_dir
+        wt_path = task_worktree_dir(research_home, TEAM, "testrepo", task["id"])
+        assert wt_path.is_dir(), "Researching.enter should have created worktree"
+
+        # researching -> reporting (notifies human)
+        task = change_status(research_home, TEAM, task["id"], "reporting")
+        assert task["status"] == "reporting"
+        assert task["assignee"] == "nikhil", "Reporting.assign should assign to human"
+
+        # reporting -> done
+        task = change_status(research_home, TEAM, task["id"], "done")
+        assert task["status"] == "done"
+        assert task["completed_at"] not in ("", None)
+
+    def test_research_back_to_researching(self, research_home, tmp_path):
+        """Reporting can transition back to researching for more experiments."""
+        repo = _setup_git_repo(tmp_path)
+        _register_repo(research_home, "testrepo", repo)
+
+        task = create_task(
+            research_home, TEAM,
+            title="More experiments needed",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+        )
+        task = change_status(research_home, TEAM, task["id"], "researching")
+        task = change_status(research_home, TEAM, task["id"], "reporting")
+        assert task["status"] == "reporting"
+
+        # Send back for more research
+        task = change_status(research_home, TEAM, task["id"], "researching")
+        assert task["status"] == "researching"
+        assert task["assignee"] == "rosalind"
+
+    def test_research_cancellation(self, research_home, tmp_path):
+        """Research task can be cancelled from any non-terminal stage."""
+        repo = _setup_git_repo(tmp_path)
+        _register_repo(research_home, "testrepo", repo)
+
+        task = create_task(
+            research_home, TEAM,
+            title="Cancel me",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+        )
+        task = change_status(research_home, TEAM, task["id"], "researching")
+        task = change_status(research_home, TEAM, task["id"], "cancelled")
+        assert task["status"] == "cancelled"
+        assert task["completed_at"] not in ("", None)
+
+    def test_invalid_research_transition(self, research_home, tmp_path):
+        """Cannot skip from todo directly to reporting."""
+        task = create_task(
+            research_home, TEAM,
+            title="Bad transition",
+            assignee="rosalind",
+            workflow_name="research",
+        )
+
+        with pytest.raises(ValueError, match="Invalid transition"):
+            change_status(research_home, TEAM, task["id"], "reporting")
+
+
+class TestResearcherSandbox:
+    """Test that researcher role gets relaxed git restrictions."""
+
+    def test_researcher_sandbox_allows_reset(self):
+        """Researcher role should allow git reset --hard."""
+        from delegate.runtime import _sandbox_for_role
+
+        disallowed, denied = _sandbox_for_role("researcher")
+
+        # git reset --hard should NOT be in the deny lists
+        assert not any("git reset --hard" in t for t in disallowed)
+        assert "git reset --hard" not in denied
+
+        # git checkout should NOT be in the deny lists
+        assert not any("git checkout" in t for t in disallowed)
+        assert "git checkout" not in denied
+
+        # git branch should NOT be in the deny lists
+        assert not any("git branch" in t for t in disallowed)
+        assert "git branch" not in denied
+
+        # But dangerous ops should still be denied
+        assert any("git push" in t for t in disallowed)
+        assert "git push" in denied
+        assert any("git rebase" in t for t in disallowed)
+        assert "git rebase" in denied
+
+    def test_engineer_sandbox_unchanged(self):
+        """Non-researcher roles should retain full restrictions."""
+        from delegate.runtime import _sandbox_for_role, DISALLOWED_TOOLS, DENIED_BASH_PATTERNS
+
+        disallowed, denied = _sandbox_for_role("engineer")
+        assert disallowed == DISALLOWED_TOOLS
+        assert denied == DENIED_BASH_PATTERNS
