@@ -114,6 +114,10 @@ html, body { height: 100%; }
   --status-merge_failed-bg:rgba(241,76,76,0.10);
   --status-cancelled:      var(--semantic-gray);
   --status-cancelled-bg:   rgba(85,85,85,0.10);
+  --status-researching:    #b0b0b0;
+  --status-researching-bg: rgba(176,176,176,0.10);
+  --status-reporting:      var(--semantic-red);
+  --status-reporting-bg:   rgba(241,76,76,0.10);
 
   /* ── Agent status dots — 3-tier (no red on agents) ──
      Whitish: active (agent working)
@@ -373,6 +377,8 @@ body {
 .sb-dot.dot-rejected    { background: var(--status-rejected); }
 .sb-dot.dot-merge_failed { background: var(--status-merge_failed); }
 .sb-dot.dot-cancelled   { background: var(--status-cancelled); }
+.sb-dot.dot-researching { background: var(--status-researching); }
+.sb-dot.dot-reporting   { background: var(--status-reporting); }
 
 /* Scrollable container for agent list */
 .sb-agents-scroll {
@@ -1319,6 +1325,8 @@ body {
 .badge-merge_failed::before { background: var(--status-merge_failed); }
 .badge-cancelled::before   { background: var(--status-cancelled); }
 .badge-cancelled { text-decoration: line-through; }
+.badge-researching::before { background: var(--status-researching); }
+.badge-reporting::before   { background: var(--status-reporting); }
 
 /* ================================================================
    Task VCS / Diff buttons
@@ -3518,6 +3526,8 @@ select option:hover {
 .sidebar-task-dot.dot-rejected { background: var(--status-rejected); }
 .sidebar-task-dot.dot-merge_failed { background: var(--status-merge_failed); }
 .sidebar-task-dot.dot-cancelled { background: var(--status-cancelled); }
+.sidebar-task-dot.dot-researching { background: var(--status-researching); }
+.sidebar-task-dot.dot-reporting { background: var(--status-reporting); }
 .sidebar-agent-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .sidebar-agent-dot.dot-active          { background: var(--dot-active); }
 .sidebar-agent-dot.dot-manager-active  { background: var(--dot-manager-active); }

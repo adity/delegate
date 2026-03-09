@@ -351,7 +351,7 @@ export { diff2HtmlRender, diff2HtmlParse };
 // Fallback hardcoded mapping is kept for backward compatibility.
 const _tierMap = {
   in_approval: 0, merging: 0, merge_failed: 0,
-  in_progress: 1, in_review: 1,
+  in_progress: 1, in_review: 1, researching: 1, reporting: 0,
   todo: 2,
   done: 3, cancelled: 4,
 };
@@ -386,12 +386,13 @@ export function taskIdStr(id, prefix, seq) {
 export const roleBadgeMap = {
   engineer: "Engineer", worker: "Worker", manager: "Manager", qa: "QA",
   design: "Design", backend: "Backend", frontend: "Frontend",
+  researcher: "Researcher",
 };
 
 // ── Agent dot helpers ──
 export function getAgentDotClass(agent, tasksList, stats) {
   if (!agent.pid) return "dot-offline";
-  const assignedTask = tasksList.find(t => t.assignee === agent.name && t.status === "in_progress");
+  const assignedTask = tasksList.find(t => t.assignee === agent.name && (t.status === "in_progress" || t.status === "researching"));
   const taskUpdated = assignedTask ? new Date(assignedTask.updated_at) : null;
   const lastActive = stats && stats.last_active ? new Date(stats.last_active) : null;
   const timestamps = [taskUpdated, lastActive].filter(Boolean);
@@ -406,7 +407,7 @@ export function getAgentDotClass(agent, tasksList, stats) {
 
 export function getAgentDotTooltip(dotClass, agent, tasksList) {
   if (dotClass === "dot-offline") return "Offline";
-  const assignedTask = tasksList.find(t => t.assignee === agent.name && t.status === "in_progress");
+  const assignedTask = tasksList.find(t => t.assignee === agent.name && (t.status === "in_progress" || t.status === "researching"));
   const lastTs = assignedTask && assignedTask.updated_at ? assignedTask.updated_at : null;
   const timeStr = lastTs ? fmtRelativeTime(lastTs) : "";
   if (dotClass === "dot-active" || dotClass === "dot-manager-active") return "Active" + (timeStr ? " \u2014 last activity " + timeStr : "");
