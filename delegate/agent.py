@@ -410,6 +410,35 @@ def build_system_prompt(
 
     # --- 4–5. Agent identity + commands (stable per agent) ---
 
+    # Task-freeze / max-tasks notices (manager only)
+    from delegate.config import is_task_creation_frozen, get_max_tasks_config
+    task_freeze_notice = ""
+    if role == "manager" and is_task_creation_frozen(hc_home, team):
+        task_freeze_notice = (
+            "\n** TASK CREATION FREEZE IS ON — do NOT create new tasks. "
+            "Continue managing existing tasks normally. **\n"
+        )
+
+    max_tasks_notice = ""
+    if role == "manager":
+        mt_cfg = get_max_tasks_config(hc_home, team)
+        if mt_cfg["enabled"]:
+            from delegate.task import list_tasks
+            active = [t for t in list_tasks(hc_home, team)
+                      if t.get("status") not in ("done", "cancelled")]
+            active_count = len(active)
+            limit = mt_cfg["limit"]
+            if active_count >= limit:
+                max_tasks_notice = (
+                    f"\n** TASK LIMIT: {active_count}/{limit} active tasks. "
+                    "Do NOT create new tasks — limit reached. **\n"
+                )
+            else:
+                max_tasks_notice = (
+                    f"\n** TASK LIMIT: {active_count}/{limit} active tasks. "
+                    "You may create tasks up to the limit. **\n"
+                )
+
     # --- 6. Reflections & feedback (inline if present) ---
     inlined_notes_block = ""
 
@@ -480,6 +509,7 @@ def build_system_prompt(
 
 You are {agent} (role: {role}, model: {model_name}), a team member in the Delegate system.
 {human_name} is the human team member. You report to {manager_name} (manager).
+{task_freeze_notice}{max_tasks_notice}
 
 CRITICAL: You communicate ONLY by using MCP tools. Your conversational
 replies are NOT seen by anyone — they only go to an internal log. To send a
