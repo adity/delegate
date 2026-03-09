@@ -1091,9 +1091,9 @@ def workflow_update_actions(ctx: click.Context, team_name: str, name: str, actio
 @click.argument("team_name")
 @click.pass_context
 def workflow_init(ctx: click.Context, team_name: str) -> None:
-    """Register the built-in 'default' workflow for a team.
+    """Register built-in workflows (default + research) for a team.
 
-    This copies the default workflow shipped with Delegate into the
+    This copies the built-in workflows shipped with Delegate into the
     team's workflows directory.  Safe to re-run.
     """
     from delegate.workflow import register_workflow, get_latest_version
@@ -1101,23 +1101,28 @@ def workflow_init(ctx: click.Context, team_name: str) -> None:
 
     hc_home = _get_home(ctx)
 
-    # Check if already registered
-    current = get_latest_version(hc_home, team_name, "default")
-    if current is not None:
-        info(f"Workflow 'default' v{current} already registered for team '{team_name}'")
-        return
+    # Built-in workflows to register
+    builtins = [
+        ("default", "default.py"),
+        ("research", "research.py"),
+    ]
 
-    # Find the built-in default.py
-    builtin = Path(__file__).parent / "workflows" / "default.py"
-    if not builtin.is_file():
-        raise click.ClickException(f"Built-in default workflow not found at {builtin}")
+    for wf_name, filename in builtins:
+        current = get_latest_version(hc_home, team_name, wf_name)
+        if current is not None:
+            info(f"Workflow '{wf_name}' v{current} already registered for team '{team_name}'")
+            continue
 
-    try:
-        wf = register_workflow(hc_home, team_name, builtin)
-    except (FileNotFoundError, ValueError) as exc:
-        raise click.ClickException(str(exc))
+        builtin = Path(__file__).parent / "workflows" / filename
+        if not builtin.is_file():
+            raise click.ClickException(f"Built-in {wf_name} workflow not found at {builtin}")
 
-    success(f"Registered built-in workflow '{wf.name}' v{wf.version} for team '{team_name}'")
+        try:
+            wf = register_workflow(hc_home, team_name, builtin)
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(str(exc))
+
+        success(f"Registered built-in workflow '{wf.name}' v{wf.version} for team '{team_name}'")
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1451,7 @@ def nuke(ctx: click.Context) -> None:
     click.echo(f"Directory: {hc_home}")
     click.echo()
 
-    confirmation = click.prompt('Type "delete everything" to confirm', type=str)
+    confirmation = click.prompt('Type "delete everything" to confirm', type=str, default="")
 
     if confirmation != "delete everything":
         click.echo("Aborted. Nothing was deleted.")

@@ -116,6 +116,37 @@ DENIED_BASH_PATTERNS = [
     "DELETE FROM",
 ]
 
+# Git commands that the researcher role is allowed to use (for discarding
+# failed experiments via git reset --hard, and managing experiment branches).
+# These are removed from DISALLOWED_TOOLS and DENIED_BASH_PATTERNS when
+# creating a Telephone for a researcher agent.
+_RESEARCHER_GIT_ALLOWLIST = {
+    "git reset --hard",
+    "git checkout",
+    "git branch",
+}
+
+
+def _sandbox_for_role(role: str) -> tuple[list[str], list[str]]:
+    """Return (disallowed_tools, denied_bash_patterns) adjusted for *role*.
+
+    Researchers need ``git reset --hard``, ``git checkout``, and
+    ``git branch`` to discard failed experiments and manage experiment
+    branches within their worktree.  All other restrictions remain.
+    """
+    if role != "researcher":
+        return DISALLOWED_TOOLS, DENIED_BASH_PATTERNS
+
+    disallowed = [
+        t for t in DISALLOWED_TOOLS
+        if not any(cmd in t for cmd in _RESEARCHER_GIT_ALLOWLIST)
+    ]
+    denied = [
+        p for p in DENIED_BASH_PATTERNS
+        if p not in _RESEARCHER_GIT_ALLOWLIST
+    ]
+    return disallowed, denied
+
 # Reflection: ~1-in-20 coin flip per turn
 REFLECTION_PROBABILITY = 0.05
 
@@ -651,14 +682,16 @@ def _create_telephone(
     cache_root.mkdir(parents=True, exist_ok=True)
     settings_env = build_cache_env(str(cache_root))
 
+    disallowed, denied = _sandbox_for_role(role)
+
     return Telephone(
         preamble=preamble,
         cwd=team_dir(hc_home, team),
         model=model,
         allowed_write_paths=_write_paths_for_role(hc_home, team, agent, role) + [tmpdir],
         add_dirs=add_dirs,
-        disallowed_tools=DISALLOWED_TOOLS,
-        denied_bash_patterns=DENIED_BASH_PATTERNS,
+        disallowed_tools=disallowed,
+        denied_bash_patterns=denied,
         on_rotation=_on_rotation,
         sandbox_enabled=True,
         mcp_servers=mcp_servers,

@@ -142,6 +142,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 "priority": {"type": "string", "description": "low, medium, high, or critical"},
                 "repo": {"type": "string", "description": "Repository name for the task"},
                 "depends_on": {"type": "string", "description": "Comma-separated task IDs this depends on"},
+                "workflow": {"type": "string", "description": "Workflow name (default: 'default'). Use 'research' for autonomous experiment tasks."},
             },
             "required": ["title"],
         },
@@ -169,6 +170,8 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                     return _error_result(
                         "depends_on must be comma-separated integers (e.g. '1,2,3')"
                     )
+            if args.get("workflow"):
+                kwargs["workflow_name"] = args["workflow"]
 
             task = create_task(hc_home, team, **kwargs)
             return _json_result(task)
