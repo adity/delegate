@@ -89,6 +89,24 @@ Test 15: Custom workflow
   Define a minimal custom workflow with 3 stages
   → run a task through it
   Verify: custom stages execute, default workflow unaffected
+
+Test 15b: Research workflow happy path
+  Create task with workflow=research → todo → researching → reporting → done
+  Verify: worktree created on enter, researcher assigned via DRI,
+  human assigned on reporting, completed_at set on done
+
+Test 15c: Research workflow loop back
+  Researching → reporting → researching (human sends back for more experiments)
+  Verify: DRI reassigned on re-entry, worktree still intact
+
+Test 15d: Research workflow cancellation
+  Researching → cancelled
+  Verify: completed_at set, worktree cleaned up
+
+Test 15e: Researcher sandbox
+  Verify: researcher role allows git reset --hard, git checkout, git branch
+  Verify: engineer role still blocks all git commands
+  Verify: researcher still blocked from git push, git rebase, git merge
 Tier 3: UI (Playwright)
 Test 16: Page loads, sidebar shows agents and tasks
   Verify: agents listed with status, tasks listed with status

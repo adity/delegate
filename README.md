@@ -78,7 +78,7 @@ Meanwhile, you can send more tasks — Delegate will prioritize, assign, and mul
 
 **Async by default.** You don't need to sit and watch. Send Delegate a task, close your laptop, come back later. The team keeps working — writing code, reviewing each other, running tests. Check in when you want. This is the fundamental difference from copilots, which require your continuous presence.
 
-**Agents that coordinate, not just execute.** Engineers don't work in isolation. When one agent finishes coding, another reviews the diff and runs the test suite. Tasks flow through `todo → in_progress → in_review → in_approval → merging → done` with agents handling each transition — just like a well-run engineering team.
+**Agents that coordinate, not just execute.** Engineers don't work in isolation. When one agent finishes coding, another reviews the diff and runs the test suite. Tasks flow through `todo → in_progress → in_review → in_approval → merging → done` with agents handling each transition — just like a well-run engineering team. Research tasks follow their own lifecycle: `todo → researching → reporting → done`.
 
 **Browser UI with real-time visibility.** Watch agents pick up tasks, write code, and review each other's work — live. Approve merges, browse diffs, inspect files, and run shell commands — all from the browser.
 
@@ -102,6 +102,10 @@ class Deploy(Stage):
 def my_workflow():
     return [Todo, InProgress, InReview, Deploy, Done]
 ```
+
+Ships with two built-in workflows: the **default** software development workflow (`todo → in_progress → in_review → in_approval → merging → done`) and a **research** workflow for autonomous experimentation (`todo → researching → reporting → done`).
+
+**Autonomous research agents.** Assign a `researcher` role agent to run iterative experiments — hyperparameter tuning, architecture search, code optimization. The researcher modifies code, runs experiments, keeps improvements, discards failures, and loops autonomously for hours. Results are logged to a structured TSV and reported when ready for human review. Researchers get relaxed git permissions (`git reset --hard`, `git checkout`) for discarding failed experiments within their worktree.
 
 **Mix models by role.** All agents default to Claude Sonnet. Override per agent with `--model opus` for tasks requiring stronger reasoning.
 
@@ -129,7 +133,7 @@ def my_workflow():
 └── db.sqlite             # Messages, tasks, events
 ```
 
-Agents are [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instances. The Delegate agent is the EM — it reads your messages, breaks down work, assigns tasks, and coordinates the team. Engineers work in git worktrees and communicate through a message bus. The daemon dispatches agent turns as async tasks, multiplexing across the whole team. All storage is local files — plaintext or sqlite.
+Agents are [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instances. The Delegate agent is the EM — it reads your messages, breaks down work, assigns tasks, and coordinates the team. Engineers work in git worktrees and communicate through a message bus. Researchers run autonomous experiment loops in their worktrees. The daemon dispatches agent turns as async tasks, multiplexing across the whole team. All storage is local files — plaintext or sqlite.
 
 There's no magic. You can `ls` into any agent's directory and see exactly what they're doing. Worklogs, memory journals, context files — it's all plain text.
 
@@ -145,6 +149,7 @@ Every agent turn runs with a programmatic guard that inspects each tool call bef
 |------|-------------------|
 | Manager | Entire team directory (`~/.delegate/teams/<team>/`) |
 | Engineer | Own agent directory, task worktree(s), team `shared/` folder |
+| Researcher | Same as engineer |
 
 Writes outside these paths are denied with an error message — the model sees the denial and can adjust.
 
@@ -167,6 +172,8 @@ git branch, git remote, git filter-branch, git reflog expire
 ```
 
 Agents never see these tools and cannot invoke them — branch management is handled by Delegate's merge worker instead.
+
+**Exception: researcher role.** Researchers need to discard failed experiments, so they are granted `git reset --hard`, `git checkout`, and `git branch` within their worktree. All other git restrictions (push, rebase, merge, fetch, etc.) remain enforced.
 
 **3. OS-level bash sandbox (macOS Seatbelt / Linux bubblewrap)**
 
@@ -222,8 +229,9 @@ delegate team add backend --agents 3 --repo /path/to/repo
 delegate team list
 delegate repo add myteam /path/to/another-repo --test-cmd "pytest -x"
 delegate agent add myteam carol --role engineer
+delegate agent add myteam rosalind --role researcher  # Add a research agent
 
-delegate workflow init myteam                     # Register default workflow
+delegate workflow init myteam                     # Register default + research workflows
 delegate workflow add myteam ./my-workflow.py     # Register custom workflow
 
 delegate repo prefer-main myteam myrepo conftest.py yarn.lock  # Files that always use main's version

@@ -6,6 +6,17 @@ and `web.py`.
 
 ---
 
+## Scope
+
+This document covers the merge flow for tasks using the **default** software
+development workflow (`todo → in_progress → in_review → in_approval → merging → done`).
+
+Tasks using the **research** workflow (`todo → researching → reporting → done`)
+do not go through the merge pipeline — they skip review/merge entirely. Researcher
+agents manage their own git state within the worktree (including `git reset --hard`
+for discarding failed experiments). Research worktrees are cleaned up when the task
+reaches `done` or `cancelled`.
+
 ## Merge Flow Steps
 
 The full merge sequence for a task in `in_approval` state:

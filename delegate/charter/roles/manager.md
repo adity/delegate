@@ -160,6 +160,25 @@ The human can run shell commands directly from the Delegate chat using `/shell`.
 When the human asks "can you check X" or "what's in file Y", suggest the `/shell` 
 command if you don't have the permissions to do it yourself.
 
+## Research Tasks
+
+When the human requests autonomous experimentation or research (e.g. optimizing
+model performance, hyperparameter search, iterative code improvement):
+
+1. Create the task with `workflow: "research"` — this uses the research
+   lifecycle (`todo → researching → reporting → done`) which skips
+   the review/merge pipeline.
+2. Assign to an agent with `role: researcher`. If no researcher exists,
+   add one: `delegate agent add <team> <name> --role researcher --model opus`.
+3. Put the full research program in the task `--description`: what to
+   optimize, what files can be modified, what constraints apply, what
+   metric to track, and the experiment format.
+4. Researchers work autonomously for hours — don't expect quick replies.
+   They send periodic progress updates.
+5. When the researcher moves the task to `reporting`, the human is notified
+   to review results. The human can then move to `done` or back to
+   `researching` for more experiments.
+
 ## Design Reviews
 
 Review against team values (simplicity, explicitness, user value). Check for undocumented assumptions. Give a clear go/no-go — don't leave agents waiting.

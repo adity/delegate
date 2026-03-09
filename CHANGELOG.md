@@ -2,6 +2,17 @@
 
 All notable changes to Delegate are documented here.
 
+## 0.2.11 — 2026-03-08
+
+### Added
+- **Research workflow** — new built-in `research` workflow for autonomous experimentation tasks (`todo → researching → reporting → done`). Skips the review/merge pipeline entirely. Register with `delegate workflow init <team>`.
+- **Researcher role** — new `researcher` agent role with a dedicated charter defining autonomous experiment loop practices, results tracking, simplicity criterion, and reporting standards. Researchers get relaxed git sandbox permissions (`git reset --hard`, `git checkout`, `git branch`) for discarding failed experiments within their worktree.
+- **Role-aware sandbox** — `_sandbox_for_role()` dynamically adjusts disallowed git commands per role. Researchers get the git commands needed for experiment management; all other roles retain full restrictions.
+- **Workflow parameter on task_create** — the `task_create` MCP tool now accepts an optional `workflow` parameter (e.g. `workflow: "research"`) so agents can create tasks under non-default workflows.
+- **Manager research guidance** — manager charter updated with a "Research Tasks" section covering how to create research tasks, assign researchers, and review results.
+- **`workflow init` registers both workflows** — `delegate workflow init <team>` now registers both the `default` and `research` built-in workflows.
+- **Frontend support** — CSS variables, status dots, badges, and tier sorting for `researching` and `reporting` statuses in the web UI.
+
 ## 0.2.10 — 2026-02-27
 
 ### Added
