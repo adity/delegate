@@ -44,6 +44,34 @@ from delegate.agent import DEFAULT_MODEL, DEFAULT_MANAGER_MODEL, ALLOWED_MODELS
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Environment probing — delegates to adapters.probe_environment()
+# ---------------------------------------------------------------------------
+
+def _probe_hardware() -> str:
+    """Gather hardware context for researcher agents.
+
+    Delegates to the adapter registry so that new hardware probes
+    (AMD ROCm, TPU, etc.) can be added without touching this module.
+    """
+    from delegate.adapters import probe_environment
+    return probe_environment()
+
+
+def format_hardware_block(role: str) -> str:
+    """Return the hardware context block for a given role, or empty string."""
+    if role != "researcher":
+        return ""
+    info = _probe_hardware()
+    if not info:
+        return ""
+    return (
+        "\n\n=== HARDWARE ENVIRONMENT ===\n"
+        "(Use this to select correct packages, batch sizes, and device placement.)\n\n"
+        f"{info}\n"
+    )
+
+
 def collect_instruction_files(repo_path: Path) -> str:
     """Collect instruction files from standard locations in a repo."""
     candidates = [
@@ -125,6 +153,7 @@ class Prompt:
         repo_instructions_block = self._section_repo_instructions()
         inlined_notes_block = self._section_inlined_notes()
         files_block = self._files_block()
+        hardware_block = self._section_hardware_context()
 
         # The identity/commands section is inlined here so we can
         # replicate the exact f-string layout of the original.
@@ -208,7 +237,7 @@ Repository:
 
 Use these tools directly — do NOT run CLI commands for messaging or task management.
 For coding work, use standard bash, file editing, and git (add, commit, diff, log, status).
-{inlined_notes_block}
+{hardware_block}{inlined_notes_block}
 
 REFERENCE FILES (read as needed):
 {files_block}
@@ -234,15 +263,46 @@ Team data: {hc_home}/teams/{team}/"""
         return "\n\n---\n\n".join(sections)
 
     def _section_role_charter(self) -> str:
-        """Role-specific charter (e.g. roles/manager.md)."""
+        """Role-specific charter (e.g. roles/manager.md) + applicable addons."""
         _role_file_map = {"worker": "engineer.md"}
         role_charter_name = _role_file_map.get(self._role, f"{self._role}.md")
         role_path = base_charter_dir() / "roles" / role_charter_name
+        parts: list[str] = []
         if role_path.is_file():
             content = role_path.read_text().strip()
             if content:
-                return f"\n\n---\n\n{content}"
+                parts.append(content)
+
+        # Append applicable addon charters
+        for addon in self._applicable_addons():
+            addon_path = base_charter_dir() / "addons" / f"{addon}.md"
+            if addon_path.is_file():
+                addon_content = addon_path.read_text().strip()
+                if addon_content:
+                    parts.append(addon_content)
+
+        if parts:
+            return "\n\n---\n\n" + "\n\n".join(parts)
         return ""
+
+    def _applicable_addons(self) -> list[str]:
+        """Determine which charter addons apply to this agent.
+
+        Addons are technology-specific charter snippets (e.g. ``ml.md``)
+        loaded based on detected capabilities rather than being hardcoded
+        into the role charter.
+        """
+        addons: list[str] = []
+        if self._role != "researcher":
+            return addons
+
+        # ML addon: include if GPU hardware is detected
+        from delegate.adapters import probe_environment
+        env_info = probe_environment()
+        if env_info and "GPU: None" not in env_info:
+            addons.append("ml")
+
+        return addons
 
     def _section_team_overrides(self) -> str:
         """Per-team override charter."""
@@ -300,6 +360,10 @@ Team data: {hc_home}/teams/{team}/"""
                 )
 
         return "".join(parts)
+
+    def _section_hardware_context(self) -> str:
+        """Hardware context for researcher agents (GPU, CUDA, RAM, etc.)."""
+        return format_hardware_block(self._role)
 
     def _files_block(self) -> str:
         """Raw reference file pointers text."""

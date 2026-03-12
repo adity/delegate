@@ -306,6 +306,22 @@ def task_worktree_dir(hc_home: Path, team: str, repo_name: str, task_id: int) ->
     return team_dir(hc_home, team) / "worktrees" / repo_name / format_task_id(task_id)
 
 
+# Mapping from artifact category (used in tool schemas) to subdirectory name.
+# The canonical source is delegate.adapters.DEFAULT_ARTIFACT_CATEGORIES.
+from delegate.adapters import DEFAULT_ARTIFACT_CATEGORIES as ARTIFACT_CATEGORIES
+
+
+def task_artifacts_dir(hc_home: Path, team: str, task_id: int) -> Path:
+    """Per-task artifacts directory: ``teams/{team}/artifacts/T{id}/``.
+
+    Unlike worktrees, this directory persists after task completion.
+    Used for model checkpoints, training logs, evaluation reports,
+    and other large binary outputs that don't belong in git.
+    """
+    from delegate.task import format_task_id
+    return team_dir(hc_home, team) / "artifacts" / format_task_id(task_id)
+
+
 def shared_dir(hc_home: Path, team: str) -> Path:
     """Team-level shared knowledge base directory."""
     return team_dir(hc_home, team) / "shared"

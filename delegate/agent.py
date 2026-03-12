@@ -371,12 +371,25 @@ def build_system_prompt(
         "worker": "engineer.md",   # legacy: workers map to engineer role charter
     }
     role_charter_name = _role_file_map.get(role, f"{role}.md")
-    role_block = ""
+    role_parts: list[str] = []
     role_path = charter_dir / "roles" / role_charter_name
     if role_path.is_file():
         content = role_path.read_text().strip()
         if content:
-            role_block = f"\n\n---\n\n{content}"
+            role_parts.append(content)
+
+    # Append applicable addon charters (e.g. ml.md when GPU detected)
+    if role == "researcher":
+        from delegate.adapters import probe_environment
+        env_info = probe_environment()
+        if env_info and "GPU: None" not in env_info:
+            addon_path = charter_dir / "addons" / "ml.md"
+            if addon_path.is_file():
+                addon_content = addon_path.read_text().strip()
+                if addon_content:
+                    role_parts.append(addon_content)
+
+    role_block = ("\n\n---\n\n" + "\n\n".join(role_parts)) if role_parts else ""
 
     # --- 3. Team override charter ---
     override_block = ""
@@ -500,6 +513,10 @@ def build_system_prompt(
 
     files_block = "\n".join(file_pointers)
 
+    # --- Hardware context (researcher only) ---
+    from delegate.prompt import format_hardware_block
+    hardware_block = format_hardware_block(role)
+
     return f"""\
 === TEAM CHARTER ===
 
@@ -540,7 +557,7 @@ Repository:
 
 Use these tools directly — do NOT run CLI commands for messaging or task management.
 For coding work, use standard bash, file editing, and git (add, commit, diff, log, status).
-{inlined_notes_block}
+{hardware_block}{inlined_notes_block}
 
 REFERENCE FILES (read as needed):
 {files_block}
