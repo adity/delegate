@@ -278,8 +278,10 @@ def _all_deps_resolved(hc_home: Path, team: str, task: dict) -> bool:
             continue
         # Check workflow-aware terminal status
         try:
-            from delegate.workflow import load_workflow
-            wf = load_workflow(hc_home, team)
+            from delegate.workflow import load_workflow_cached
+            wf_name = dep_task.get("workflow", "default")
+            wf_version = dep_task.get("workflow_version", 1)
+            wf = load_workflow_cached(hc_home, team, wf_name, wf_version)
             if wf and wf.is_terminal(dep_status):
                 continue
         except Exception:
@@ -722,7 +724,75 @@ def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_
         log_event(hc_home, team, f"{format_task_id(task_id)} {old_status} \u2192 {new_status}", task_id=task_id)
         _broadcast_update(task_id, team, {"status": status})
 
+    # ── Auto-advance dependents ──
+    # When a task reaches a terminal status, check if any tasks that
+    # depend on it now have all dependencies satisfied.  If so,
+    # auto-transition them from 'todo' to their first working stage.
+    if status in ("done", "cancelled"):
+        try:
+            _auto_advance_dependents(hc_home, team, task_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Auto-advance dependents failed for %s: %s",
+                format_task_id(task_id), exc,
+            )
+
     return task
+
+
+def _auto_advance_dependents(hc_home: Path, team: str, completed_task_id: int) -> None:
+    """Auto-advance tasks whose dependencies are now all resolved.
+
+    When a task reaches 'done' (or 'cancelled'), iterate over all 'todo'
+    tasks that include ``completed_task_id`` in their ``depends_on`` list.
+    If all of that task's dependencies are now resolved, transition it to
+    the first working stage of its workflow.
+
+    For the default workflow, this is 'in_progress'.
+    For the research workflow, this is 'researching'.
+    """
+    from delegate.workflow import load_workflow_cached
+
+    all_tasks = list_tasks(hc_home, team, status="todo")
+    for task in all_tasks:
+        deps = task.get("depends_on", [])
+        if not deps or completed_task_id not in [int(d) for d in deps]:
+            continue
+
+        # Check if ALL deps are now resolved
+        if not _all_deps_resolved(hc_home, team, task):
+            continue
+
+        # Determine the first working stage from the workflow
+        wf_name = task.get("workflow", "default")
+        wf_version = task.get("workflow_version", 1)
+        first_stage = "in_progress"  # default workflow fallback
+
+        try:
+            wf = load_workflow_cached(hc_home, team, wf_name, wf_version)
+            # The first non-initial, non-terminal stage is the working stage
+            for stage_key, stage_cls in wf.stage_map.items():
+                if stage_key == "todo":
+                    continue
+                inst = stage_cls()
+                if not getattr(inst, 'terminal', False):
+                    first_stage = stage_key
+                    break
+        except (FileNotFoundError, KeyError):
+            pass
+
+        try:
+            change_status(hc_home, team, task["id"], first_stage)
+            logging.getLogger(__name__).info(
+                "Auto-advanced %s to '%s' (dependency %s resolved)",
+                format_task_id(task["id"]), first_stage,
+                format_task_id(completed_task_id),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Failed to auto-advance %s: %s",
+                format_task_id(task["id"]), exc,
+            )
 
 
 def _legacy_validate_transition(current: str, status: str) -> None:
