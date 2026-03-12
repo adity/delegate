@@ -1,13 +1,13 @@
 """In-process MCP tools for agent data/metadata operations.
 
 These tools run inside the daemon process (outside the OS sandbox) and
-provide agents with safe access to the database and configuration files
+provide agents with safe access to configuration files
 without requiring shell access to ``protected/``.
 
 Each tool closure captures ``hc_home``, ``team``, and ``agent`` so that:
 - Agents cannot impersonate other agents (sender identity is baked in).
 - All operations go through the model layer (same validation as CLI).
-- The database and config files are only modified via trusted code paths.
+- Config files are only modified via trusted code paths.
 
 Admin operations (``delegate network``, ``delegate team``, ``delegate workflow``)
 are intentionally NOT exposed here.
@@ -36,6 +36,29 @@ def _json_result(data: Any) -> dict:
 def _error_result(msg: str) -> dict:
     """Return an MCP tool error result."""
     return {"content": [{"type": "text", "text": f"ERROR: {msg}"}], "isError": True}
+
+
+def _load_artifact_manifest(art_dir: Path) -> list[dict]:
+    """Load the artifact manifest for a task, returning [] if missing/corrupt."""
+    manifest_path = art_dir / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        return json.loads(manifest_path.read_text())
+    except Exception:
+        return []
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds as a human-readable duration string."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h}h {m}m"
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +850,304 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             logger.exception("task_reject failed")
             return _error_result(str(e))
 
+    # -----------------------------------------------------------------------
+    # Artifact management tools
+    # -----------------------------------------------------------------------
+
+    from delegate.adapters import DEFAULT_ARTIFACT_CATEGORIES as _art_cats
+    _art_category_list = list(_art_cats.keys())
+
+    @tool(
+        "artifact_save",
+        "Save a file as a named artifact for a task (e.g. checkpoint, report, data). "
+        "Copies the file from the worktree to the persistent artifacts directory. "
+        "Artifacts survive worktree teardown.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID to save artifact for"},
+                "source_path": {"type": "string", "description": "Absolute path to the file to save"},
+                "artifact_name": {"type": "string", "description": "Name for the artifact"},
+                "category": {
+                    "type": "string",
+                    "description": f"Category: one of {_art_category_list} (determines subdirectory)",
+                    "enum": _art_category_list,
+                },
+            },
+            "required": ["task_id", "source_path", "artifact_name", "category"],
+        },
+    )
+    async def artifact_save(args: dict) -> dict:
+        try:
+            import shutil
+            from delegate.paths import task_artifacts_dir, ARTIFACT_CATEGORIES
+
+            task_id = args["task_id"]
+            source = Path(args["source_path"])
+            name = args["artifact_name"]
+            category = args["category"]
+
+            if not source.exists():
+                return _error_result(f"Source file not found: {source}")
+
+            art_dir = task_artifacts_dir(hc_home, team, task_id)
+            dest_dir = art_dir / ARTIFACT_CATEGORIES.get(category, category)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            dest = dest_dir / name
+            if source.is_dir():
+                shutil.copytree(str(source), str(dest), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(source), str(dest))
+
+            # Update manifest
+            manifest = _load_artifact_manifest(art_dir)
+            manifest_path = art_dir / "manifest.json"
+
+            import time as _time
+            manifest.append({
+                "name": name,
+                "category": category,
+                "path": str(dest),
+                "size_bytes": dest.stat().st_size if dest.is_file() else -1,
+                "saved_at": _time.time(),
+                "saved_by": agent,
+            })
+            manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
+
+            return _json_result({
+                "artifact": name,
+                "path": str(dest),
+                "message": f"Artifact '{name}' saved to {dest}",
+            })
+        except Exception as e:
+            logger.exception("artifact_save failed")
+            return _error_result(str(e))
+
+    @tool(
+        "artifact_list",
+        "List all saved artifacts for a task.",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID"},
+            },
+            "required": ["task_id"],
+        },
+    )
+    async def artifact_list(args: dict) -> dict:
+        try:
+            from delegate.paths import task_artifacts_dir
+
+            art_dir = task_artifacts_dir(hc_home, team, args["task_id"])
+            manifest = _load_artifact_manifest(art_dir)
+            if not manifest:
+                return _text_result(f"No artifacts for T{args['task_id']:04d}")
+            return _json_result(manifest)
+        except Exception as e:
+            logger.exception("artifact_list failed")
+            return _error_result(str(e))
+
+    @tool(
+        "artifact_path",
+        "Get the absolute path to a saved artifact (for use in scripts or follow-up tasks).",
+        {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "Task ID"},
+                "artifact_name": {"type": "string", "description": "Name of the artifact"},
+            },
+            "required": ["task_id", "artifact_name"],
+        },
+    )
+    async def artifact_path(args: dict) -> dict:
+        try:
+            from delegate.paths import task_artifacts_dir
+
+            art_dir = task_artifacts_dir(hc_home, team, args["task_id"])
+            manifest = _load_artifact_manifest(art_dir)
+            if not manifest:
+                return _error_result(f"No artifacts for T{args['task_id']:04d}")
+            for entry in manifest:
+                if entry["name"] == args["artifact_name"]:
+                    return _json_result({"path": entry["path"], "name": entry["name"]})
+            return _error_result(f"Artifact '{args['artifact_name']}' not found")
+        except Exception as e:
+            logger.exception("artifact_path failed")
+            return _error_result(str(e))
+
+    # -----------------------------------------------------------------------
+    # Background process tools (long-running commands for researchers)
+    # -----------------------------------------------------------------------
+
+    @tool(
+        "run_background",
+        "Launch a long-running command as a background process (e.g. GPU training, "
+        "data processing). Returns a handle to check status later. Use this for any "
+        "command expected to run longer than 2 minutes.",
+        {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to run (e.g. 'python train.py --epochs 50')",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory (absolute path). Defaults to agent's workspace.",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short human-readable label for this process (e.g. 'experiment v3')",
+                },
+                "max_hours": {
+                    "type": "number",
+                    "description": "Maximum runtime in hours before auto-kill (default: 4)",
+                },
+            },
+            "required": ["command"],
+        },
+    )
+    async def run_background(args: dict) -> dict:
+        try:
+            from delegate.background import launch
+            from delegate.paths import agent_dir as _agent_dir
+
+            ad = _agent_dir(hc_home, team, agent)
+            max_runtime = (args.get("max_hours") or 4) * 3600
+
+            info = launch(
+                ad,
+                args["command"],
+                cwd=args.get("cwd"),
+                label=args.get("label", ""),
+                max_runtime=max_runtime,
+            )
+            return _json_result({
+                "handle": info.handle,
+                "pid": info.pid,
+                "label": info.label,
+                "message": (
+                    f"Background process started (handle={info.handle}). "
+                    f"Use check_background to monitor progress."
+                ),
+            })
+        except Exception as e:
+            logger.exception("run_background failed")
+            return _error_result(str(e))
+
+    @tool(
+        "check_background",
+        "Check the status of a background process and get recent output. "
+        "Returns state (running/completed/failed/cancelled/timed_out), "
+        "exit code, elapsed time, and the last N lines of stdout/stderr.",
+        {
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "Process handle returned by run_background",
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "description": "Number of lines to return from end of output (default: 40)",
+                },
+            },
+            "required": ["handle"],
+        },
+    )
+    async def check_background(args: dict) -> dict:
+        try:
+            from delegate.background import check, tail as bg_tail
+            from delegate.paths import agent_dir as _agent_dir
+
+            ad = _agent_dir(hc_home, team, agent)
+            handle = args["handle"]
+
+            info = check(ad, handle)
+            if info is None:
+                return _error_result(f"Unknown background process handle: {handle}")
+
+            n = args.get("tail_lines") or 40
+            logs = bg_tail(ad, handle, n=n)
+
+            import time
+            elapsed = (info.ended_at or time.time()) - info.started_at
+
+            result = {
+                "handle": info.handle,
+                "state": info.state,
+                "exit_code": info.exit_code,
+                "label": info.label,
+                "elapsed_seconds": round(elapsed, 1),
+                "elapsed_human": _format_duration(elapsed),
+                "stdout_tail": logs.get("stdout", ""),
+                "stderr_tail": logs.get("stderr", ""),
+            }
+            return _json_result(result)
+        except Exception as e:
+            logger.exception("check_background failed")
+            return _error_result(str(e))
+
+    @tool(
+        "cancel_background",
+        "Cancel (kill) a running background process.",
+        {
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "Process handle returned by run_background",
+                },
+            },
+            "required": ["handle"],
+        },
+    )
+    async def cancel_background(args: dict) -> dict:
+        try:
+            from delegate.background import cancel
+            from delegate.paths import agent_dir as _agent_dir
+
+            ad = _agent_dir(hc_home, team, agent)
+            info = cancel(ad, args["handle"])
+            if info is None:
+                return _error_result(f"Unknown background process handle: {args['handle']}")
+            return _text_result(f"Process {info.handle} cancelled (was pid {info.pid})")
+        except Exception as e:
+            logger.exception("cancel_background failed")
+            return _error_result(str(e))
+
+    @tool(
+        "list_background",
+        "List all background processes (running and completed) for this agent.",
+        {},
+    )
+    async def list_background(args: dict) -> dict:
+        try:
+            from delegate.background import list_all
+            from delegate.paths import agent_dir as _agent_dir
+            import time
+
+            ad = _agent_dir(hc_home, team, agent)
+            procs = list_all(ad)
+            result = []
+            for info in procs:
+                elapsed = (info.ended_at or time.time()) - info.started_at
+                result.append({
+                    "handle": info.handle,
+                    "state": info.state,
+                    "label": info.label,
+                    "exit_code": info.exit_code,
+                    "elapsed": _format_duration(elapsed),
+                    "command": info.command[:120],
+                })
+            if not result:
+                return _text_result("No background processes.")
+            return _json_result(result)
+        except Exception as e:
+            logger.exception("list_background failed")
+            return _error_result(str(e))
+
     return [
         mailbox_send,
         mailbox_inbox,
@@ -844,6 +1165,13 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         task_diff,
         task_approve,
         task_reject,
+        artifact_save,
+        artifact_list,
+        artifact_path,
+        run_background,
+        check_background,
+        cancel_background,
+        list_background,
     ]
 
 

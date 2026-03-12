@@ -52,6 +52,8 @@ class Researching(Stage):
         repos = ctx.task.get("repo", [])
         if repos:
             ctx.setup_worktree()
+        # Create persistent artifacts directory (survives worktree teardown).
+        ctx.setup_artifacts()
 
 
 class Reporting(Stage):
