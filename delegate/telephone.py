@@ -832,8 +832,9 @@ class Telephone:
             # --- Bash deny-list ---
             if tool_name == "Bash" and _bash_deny:
                 cmd = tool_input.get("command", "")
+                cmd_upper = cmd.upper()
                 for pattern in _bash_deny:
-                    if pattern in cmd:
+                    if pattern.upper() in cmd_upper:
                         return _deny(f"Command denied: contains '{pattern}'")
 
             return _allow()

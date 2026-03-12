@@ -114,6 +114,8 @@ DENIED_BASH_PATTERNS = [
     "sqlite3 ",          # trailing space avoids matching variable names
     "DROP TABLE",
     "DELETE FROM",
+    "TRUNCATE ",
+    "ALTER TABLE",
 ]
 
 # Git commands that the researcher role is allowed to use (for discarding
@@ -135,7 +137,7 @@ def _sandbox_for_role(role: str) -> tuple[list[str], list[str]]:
     branches within their worktree.  All other restrictions remain.
     """
     if role != "researcher":
-        return DISALLOWED_TOOLS, DENIED_BASH_PATTERNS
+        return DISALLOWED_TOOLS, list(DENIED_BASH_PATTERNS)
 
     disallowed = [
         t for t in DISALLOWED_TOOLS
@@ -958,9 +960,17 @@ async def run_turn(
     # worktree paths that change per-turn.
     if role != "manager" and workspace_paths:
         _tmpdir = str(Path(tempfile.gettempdir()).resolve())
+        _extra_paths = [str(p) for p in workspace_paths.values()]
+        # Researchers get write access to the task artifacts directory
+        # and ARTIFACTS_DIR env var for their scripts.
+        if role == "researcher" and current_task_id is not None:
+            from delegate.paths import task_artifacts_dir
+            _art_dir = task_artifacts_dir(hc_home, team, current_task_id)
+            _extra_paths.append(str(_art_dir))
+            tel.settings_env["ARTIFACTS_DIR"] = str(_art_dir)
         tel.allowed_write_paths = (
             _write_paths_for_role(hc_home, team, agent, role)
-            + [str(p) for p in workspace_paths.values()]
+            + _extra_paths
             + [_tmpdir]
         )
 
