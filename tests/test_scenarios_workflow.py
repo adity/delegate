@@ -585,3 +585,84 @@ class TestResearcherSandbox:
         disallowed, denied = _sandbox_for_role("engineer")
         assert disallowed == DISALLOWED_TOOLS
         assert denied == DENIED_BASH_PATTERNS
+
+
+class TestAutoAdvanceDependents:
+    """Test that completing a task auto-advances dependent tasks."""
+
+    def test_auto_advance_research_pipeline(self, research_home, tmp_path):
+        """When T1 completes, T2 (depends_on=[T1]) auto-advances to researching."""
+        repo = _setup_git_repo(tmp_path)
+        _register_repo(research_home, "testrepo", repo)
+
+        # Create pipeline: T1 -> T2 -> T3
+        t1 = create_task(
+            research_home, TEAM,
+            title="Validate data",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+        )
+        t2 = create_task(
+            research_home, TEAM,
+            title="Train model",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+            depends_on=[t1["id"]],
+        )
+        t3 = create_task(
+            research_home, TEAM,
+            title="Backtest",
+            assignee="rosalind",
+            repo="testrepo",
+            workflow_name="research",
+            depends_on=[t2["id"]],
+        )
+
+        assert t2["status"] == "todo"
+        assert t3["status"] == "todo"
+
+        # Drive T1 through its lifecycle
+        t1 = change_status(research_home, TEAM, t1["id"], "researching")
+        t1 = change_status(research_home, TEAM, t1["id"], "reporting")
+        t1 = change_status(research_home, TEAM, t1["id"], "done")
+
+        # T2 should have auto-advanced to researching
+        t2 = get_task(research_home, TEAM, t2["id"])
+        assert t2["status"] == "researching", "T2 should auto-advance when T1 completes"
+
+        # T3 should still be todo (T2 not done yet)
+        t3 = get_task(research_home, TEAM, t3["id"])
+        assert t3["status"] == "todo", "T3 should stay todo — T2 not done yet"
+
+    def test_no_advance_when_deps_incomplete(self, research_home, tmp_path):
+        """Task with multiple deps doesn't advance until ALL are done."""
+        repo = _setup_git_repo(tmp_path)
+        _register_repo(research_home, "testrepo", repo)
+
+        t1 = create_task(research_home, TEAM, title="Dep 1", assignee="rosalind",
+                         repo="testrepo", workflow_name="research")
+        t2 = create_task(research_home, TEAM, title="Dep 2", assignee="rosalind",
+                         repo="testrepo", workflow_name="research")
+        t3 = create_task(research_home, TEAM, title="Dependent", assignee="rosalind",
+                         repo="testrepo", workflow_name="research",
+                         depends_on=[t1["id"], t2["id"]])
+
+        # Complete only T1
+        change_status(research_home, TEAM, t1["id"], "researching")
+        change_status(research_home, TEAM, t1["id"], "reporting")
+        change_status(research_home, TEAM, t1["id"], "done")
+
+        # T3 should still be todo (T2 not done)
+        t3 = get_task(research_home, TEAM, t3["id"])
+        assert t3["status"] == "todo"
+
+        # Now complete T2
+        change_status(research_home, TEAM, t2["id"], "researching")
+        change_status(research_home, TEAM, t2["id"], "reporting")
+        change_status(research_home, TEAM, t2["id"], "done")
+
+        # T3 should now auto-advance
+        t3 = get_task(research_home, TEAM, t3["id"])
+        assert t3["status"] == "researching"
