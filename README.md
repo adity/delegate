@@ -105,7 +105,15 @@ def my_workflow():
 
 Ships with two built-in workflows: the **default** software development workflow (`todo → in_progress → in_review → in_approval → merging → done`) and a **research** workflow for autonomous experimentation (`todo → researching → reporting → done`).
 
-**Autonomous research agents.** Assign a `researcher` role agent to run iterative experiments — hyperparameter tuning, architecture search, code optimization. The researcher modifies code, runs experiments, keeps improvements, discards failures, and loops autonomously for hours. Results are logged to a structured TSV and reported when ready for human review. Researchers get relaxed git permissions (`git reset --hard`, `git checkout`) for discarding failed experiments within their worktree.
+**Autonomous research agents.** Assign a `researcher` role agent to run iterative experiments — hyperparameter tuning, architecture search, code optimization, data analysis. The researcher modifies code, runs experiments, keeps improvements, discards failures, and loops autonomously for hours. Results are logged to a structured TSV and reported when ready for human review. Researchers get relaxed git permissions (`git reset --hard`, `git checkout`) for discarding failed experiments within their worktree.
+
+**Long-running background commands.** Experiments and builds that take minutes to hours run as detached background processes. Agents launch them with `run_background`, poll progress with `check_background`, and cancel with `cancel_background` — no timeout limits, no blocking.
+
+**Persistent artifacts.** Task outputs (checkpoints, reports, data files) are saved to a persistent artifacts directory that survives worktree teardown. Three MCP tools (`artifact_save`, `artifact_list`, `artifact_path`) manage the lifecycle. Artifacts are organized by category and tracked in a manifest.
+
+**Task pipeline chaining.** Tasks with `depends_on` relationships auto-advance when dependencies complete — completing a data preparation task automatically kicks off the training task that depends on it.
+
+**Extensible adapter system.** Technology-specific code (hardware probes, network domain groups) lives in a single adapter module. Adding support for a new GPU architecture or domain group is a single-function addition — no core changes needed. See [docs/architecture.md](docs/architecture.md) for details.
 
 **Mix models by role.** All agents default to Claude Sonnet. Override per agent with `--model opus` for tasks requiring stronger reasoning.
 
@@ -129,6 +137,8 @@ Ships with two built-in workflows: the **default** software development workflow
 │       │   └── bob/
 │       ├── repos/        # Symlinks to your real git repos
 │       ├── shared/       # Team-wide shared files
+│       ├── artifacts/    # Persistent task outputs (survive worktree teardown)
+│       │   └── T0001/    # Per-task: models/, logs/, reports/, data/, outputs/
 │       └── workflows/    # Registered workflow definitions
 └── db.sqlite             # Messages, tasks, events
 ```
@@ -136,6 +146,8 @@ Ships with two built-in workflows: the **default** software development workflow
 Agents are [Claude Code](https://docs.anthropic.com/en/docs/claude-code) instances. The Delegate agent is the EM — it reads your messages, breaks down work, assigns tasks, and coordinates the team. Engineers work in git worktrees and communicate through a message bus. Researchers run autonomous experiment loops in their worktrees. The daemon dispatches agent turns as async tasks, multiplexing across the whole team. All storage is local files — plaintext or sqlite.
 
 There's no magic. You can `ls` into any agent's directory and see exactly what they're doing. Worklogs, memory journals, context files — it's all plain text.
+
+For detailed internal architecture (module map, adapter system, extension points), see [docs/architecture.md](docs/architecture.md).
 
 ## Sandboxing & Permissions
 
@@ -153,13 +165,13 @@ Every agent turn runs with a programmatic guard that inspects each tool call bef
 
 Writes outside these paths are denied with an error message — the model sees the denial and can adjust.
 
-The same guard also enforces a **bash deny-list** — commands containing dangerous substrings are blocked before execution:
+The same guard also enforces a **bash deny-list** — commands containing dangerous substrings are blocked before execution (case-insensitive matching):
 
 ```
-sqlite3, DROP TABLE, DELETE FROM, rm -rf .git
+sqlite3, rm -rf .git, DROP TABLE, DELETE FROM, TRUNCATE, ALTER TABLE
 ```
 
-This prevents agents from directly manipulating the database or destroying git metadata, even if they attempt it via bash.
+SQL deny patterns are defined inline in `DENIED_BASH_PATTERNS` (case-insensitive matching). This prevents agents from executing destructive SQL or destroying git metadata, even if they attempt it via bash.
 
 **2. Disallowed git commands (`disallowed_tools`)**
 
@@ -198,13 +210,13 @@ delegate network reset                   # Restore curated defaults
 
 **5. In-process MCP tools (protected data access)**
 
-Agents interact with the database, task system, and mailbox through in-process MCP tools that run inside the daemon (outside the agent sandbox). This means agents never need shell access to `protected/` — all operations go through validated code paths. Agent identity is baked into each tool closure, preventing impersonation: an agent cannot send messages as another agent or access data outside its team.
+Agents interact with the task system and mailbox through in-process MCP tools that run inside the daemon (outside the agent sandbox). This means agents never need shell access to `protected/` — all operations go through validated code paths. Agent identity is baked into each tool closure, preventing impersonation: an agent cannot send messages as another agent or access data outside its team.
 
 **6. Daemon-managed worktree lifecycle**
 
 Git operations that modify branch topology — `git worktree add`, `git worktree remove`, branch creation, rebase, and merge — run exclusively in the **daemon process**, which is unsandboxed. Agents never run these commands directly. When a manager creates a task with `--repo`, only the DB record and branch name are saved; the daemon creates the actual worktree before dispatching any turns to the assigned worker. This clean separation means agents can write code and commit inside their worktrees but cannot create, remove, or manipulate worktrees or branches.
 
-Together these six layers mean: the model can only write to directories Delegate explicitly allows, cannot touch your git branch topology, cannot access the database directly, cannot contact unauthorized domains, cannot escape the sandbox even through creative bash commands, and all infrastructure operations happen in a controlled daemon context.
+Together these six layers mean: the model can only write to directories Delegate explicitly allows, cannot touch your git branch topology, cannot contact unauthorized domains, cannot escape the sandbox even through creative bash commands, and all infrastructure operations happen in a controlled daemon context.
 
 ## Configuration
 
