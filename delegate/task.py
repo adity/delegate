@@ -65,6 +65,15 @@ VALID_TRANSITIONS = {
     "cancelled": set(),
 }
 
+# Statuses with no outgoing transitions.
+TERMINAL_STATUSES = frozenset({"done", "cancelled"})
+
+# Summary-only fields returned by task_list (full details via task_show).
+SUMMARY_FIELDS = (
+    "id", "display_id", "title", "status", "assignee", "dri",
+    "priority", "workflow", "repo", "tags", "created_at", "updated_at",
+)
+
 # All columns in the tasks table (used for field validation on update).
 _TASK_FIELDS = frozenset({
     "id", "title", "description", "status", "dri", "assignee",
@@ -1234,10 +1243,13 @@ def list_tasks(
     assignee: str | None = None,
     project: str | None = None,
     tag: str | None = None,
+    exclude_statuses: frozenset[str] | None = None,
 ) -> list[dict]:
     """List tasks with optional filters.
 
     *tag* filters to tasks whose ``tags`` JSON array contains the given value.
+    *exclude_statuses* omits rows matching any of the given statuses at the
+    SQL level (avoids fetching/deserializing rows that would be discarded).
     """
     team_uuid = _team(hc_home, team)
     conn = get_connection(hc_home, team)
@@ -1248,6 +1260,10 @@ def list_tasks(
         if status:
             query += " AND status = ?"
             params.append(status)
+        if exclude_statuses:
+            placeholders = ",".join("?" * len(exclude_statuses))
+            query += f" AND status NOT IN ({placeholders})"
+            params.extend(exclude_statuses)
         if assignee:
             query += " AND assignee = ?"
             params.append(assignee)
