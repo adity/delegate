@@ -23,8 +23,25 @@ def _text_result(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
+_MAX_RESULT_BYTES = 800_000
+
+
 def _json_result(data: Any) -> dict:
-    return _text_result(json.dumps(data, indent=2, default=str))
+    text = json.dumps(data, indent=2, default=str)
+    if len(text) > _MAX_RESULT_BYTES and isinstance(data, list) and len(data) > 1:
+        lo, hi = 1, len(data)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(json.dumps(data[:mid], indent=2, default=str)) <= _MAX_RESULT_BYTES:
+                lo = mid
+            else:
+                hi = mid - 1
+        text = json.dumps(data[:lo], indent=2, default=str)
+        text += (
+            f"\n\n(showing {lo} of {len(data)} items — result exceeded "
+            f"{_MAX_RESULT_BYTES} byte limit. Use filters or task_show for details.)"
+        )
+    return _text_result(text)
 
 
 def _error_result(msg: str) -> dict:
@@ -164,11 +181,13 @@ def build_remote_agent_tools(
 
     @tool(
         "task_list",
-        "List tasks for the team, optionally filtered by status or assignee.",
+        "List tasks (summary view). Returns id, title, status, assignee, priority, and a few other fields. "
+        "Excludes done/cancelled tasks by default — pass status='done' to see them. "
+        "Use task_show(task_id) for full details on a specific task.",
         {
             "type": "object",
             "properties": {
-                "status": {"type": "string", "description": "Filter by task status"},
+                "status": {"type": "string", "description": "Filter by task status (e.g. 'todo', 'in_progress', 'done'). Without this, done/cancelled tasks are excluded."},
                 "assignee": {"type": "string", "description": "Filter by assignee name"},
             },
             "required": [],
@@ -176,13 +195,25 @@ def build_remote_agent_tools(
     )
     async def task_list(args: dict) -> dict:
         try:
+            from delegate.task import TERMINAL_STATUSES, SUMMARY_FIELDS
+
             params: dict[str, str] = {"team": team}
             if args.get("status"):
                 params["status"] = args["status"]
             if args.get("assignee"):
                 params["assignee"] = args["assignee"]
-            result = _get("/internal/task/list", params)
-            return _json_result(result)
+            tasks = _get("/internal/task/list", params)
+
+            # Exclude done/cancelled by default (can't push to SQL over HTTP)
+            if not args.get("status"):
+                tasks = [t for t in tasks if t.get("status") not in TERMINAL_STATUSES]
+
+            # Return summary-only to stay within SDK buffer limits
+            summaries = [
+                {k: t[k] for k in SUMMARY_FIELDS if k in t}
+                for t in tasks
+            ]
+            return _json_result(summaries)
         except Exception as e:
             logger.exception("remote task_list failed")
             return _error_result(str(e))
