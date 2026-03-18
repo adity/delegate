@@ -1236,6 +1236,27 @@ async def run_turn(
         broadcast_turn_event('turn_ended', agent, team=team, task_id=current_task_id, sender=primary_sender)
         log_caller.reset(_prev_caller)
 
+    # --- Researcher auto-continuation ---
+    # After a successful turn, re-check the task status.  If still
+    # "researching", inject a system continuation message so the daemon
+    # dispatches another turn automatically.  If the human paused the
+    # task mid-turn, send a wrap-up message instead so the researcher
+    # documents progress before going idle.
+    if (
+        role == "researcher"
+        and current_task_id is not None
+        and not error_occurred
+    ):
+        try:
+            _auto_continue_researcher(
+                hc_home, team, agent, current_task_id, alog,
+            )
+        except Exception:
+            logger.debug(
+                "Researcher auto-continue check failed for %s/%s",
+                team, agent, exc_info=True,
+            )
+
     return result
 
 
@@ -1250,3 +1271,78 @@ def _mark_batch_processed(hc_home: Path, team: str, batch: list[Message]) -> Non
         processed_ts = datetime.now(timezone.utc).isoformat()
         mark_processed_batch(hc_home, team, ids)
         broadcast_msg_status(team, ids, "processed_at", processed_ts)
+
+
+# --- Researcher auto-continuation ---
+
+_CONTINUE_MSG = (
+    "SYSTEM: Auto-continue — your previous turn completed.  "
+    "Continue your experiment loop.  Review your results file, "
+    "decide what to try next, and run the next experiment.  "
+    "Do NOT ask for permission — keep going."
+)
+
+_WRAP_UP_MSG = (
+    "SYSTEM: The human has paused this research task.  "
+    "Before you stop, you MUST document your progress:\n\n"
+    "1. Add a task_comment summarising:\n"
+    "   - Total experiments run and the best result vs baseline\n"
+    "   - Key findings — what worked, what didn't, and why\n"
+    "   - Recommended next steps if research is resumed\n"
+    "   - Paths to your results file and any saved artifacts\n"
+    "2. Save any unsaved artifacts (models, logs, reports) "
+    "via artifact_save.\n"
+    "3. Send a brief mailbox_send to the manager with the summary.\n\n"
+    "After documenting, your work is done — do not start new experiments."
+)
+
+
+def _auto_continue_researcher(
+    hc_home: Path,
+    team: str,
+    agent: str,
+    task_id: int,
+    alog: AgentLogger,
+) -> None:
+    """Inject a continuation or wrap-up message for a researcher.
+
+    Called after a successful researcher turn.  Re-reads the task
+    status from the DB (it may have been changed by the human or
+    manager during the turn) and decides:
+
+    * ``researching`` → inject a continuation message so the daemon
+      dispatches another turn automatically.
+    * ``paused`` → inject a wrap-up message so the researcher
+      documents results before going idle.
+    * anything else → do nothing (task is done/cancelled/etc.).
+    """
+    from delegate.task import get_task as _get_task
+    from delegate.mailbox import send as _mailbox_send
+    from delegate.config import SYSTEM_USER
+
+    try:
+        task = _get_task(hc_home, team, task_id)
+    except Exception:
+        return  # task deleted or inaccessible — nothing to do
+
+    status = task.get("status", "")
+
+    if status == "researching":
+        _mailbox_send(
+            hc_home, team,
+            sender=SYSTEM_USER,
+            recipient=agent,
+            message=_CONTINUE_MSG,
+            task_id=task_id,
+        )
+        alog.info("Auto-continue injected for task %s", format_task_id(task_id))
+
+    elif status == "paused":
+        _mailbox_send(
+            hc_home, team,
+            sender=SYSTEM_USER,
+            recipient=agent,
+            message=_WRAP_UP_MSG,
+            task_id=task_id,
+        )
+        alog.info("Wrap-up message injected for paused task %s", format_task_id(task_id))

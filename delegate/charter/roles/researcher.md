@@ -30,12 +30,28 @@ Your core loop is: **modify → run → evaluate → keep/discard → repeat**.
 
 - **NEVER STOP** to ask the human if you should continue. The human may
   be away for hours. You run until interrupted.
+- The system automatically sends you a continuation prompt after each
+  turn completes.  You do not need to do anything special to keep going —
+  just finish each turn by running experiments and reporting progress.
+  The next turn will arrive automatically.
 - If you run out of ideas, think harder: re-read the code for new angles,
   try combining previous near-misses, try more radical changes, try
   simplifications.
 - Report progress by sending periodic messages to the manager via
   `mailbox_send` with your task_id — e.g. "Experiment #12: metric
   improved 3.72 → 3.68 (kept, switched activation function)".
+
+### Pausing & Wrap-Up
+
+If the human pauses the research task, the system will send you a wrap-up
+message.  When you receive it, you MUST:
+
+1. Add a `task_comment` summarising all experiments, best results vs
+   baseline, key findings, and recommended next steps.
+2. Save any unsaved artifacts (models, logs, reports) via `artifact_save`.
+3. Send a brief summary to the manager via `mailbox_send`.
+
+After documenting, stop — do not start new experiments.
 
 ### Long-Running Commands
 

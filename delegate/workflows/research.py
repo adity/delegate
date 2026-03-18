@@ -10,8 +10,13 @@ in a worktree, and results are reviewed by a human when ready.
 Lifecycle:
 
     todo → researching → reporting → done
+                ↕
+              paused
 
 With cancellation possible from any non-terminal stage.
+The researcher auto-continues while in ``researching``.  Moving the
+task to ``paused`` triggers a graceful wrap-up (progress documentation)
+before the researcher goes idle.  Resuming moves back to ``researching``.
 
 Usage:
     Register for a team::
@@ -38,7 +43,7 @@ class Researching(Stage):
     """Researcher is actively running experiments."""
 
     label = "Researching"
-    _transitions = {"reporting", "cancelled"}
+    _transitions = {"reporting", "paused", "cancelled"}
 
     def assign(self, ctx):
         # Assign to the DRI (original researcher) if set, otherwise pick one.
@@ -54,6 +59,23 @@ class Researching(Stage):
             ctx.setup_worktree()
         # Create persistent artifacts directory (survives worktree teardown).
         ctx.setup_artifacts()
+
+
+class Paused(Stage):
+    """Research paused — researcher will document progress and stop.
+
+    A non-terminal stage that halts auto-continuation.  The researcher
+    gets one final wrap-up turn to document results, then goes idle
+    until the human resumes (→ researching) or closes out
+    (→ done / cancelled).
+    """
+
+    label = "Paused"
+    _transitions = {"researching", "done", "cancelled"}
+
+    def assign(self, ctx):
+        # Keep current assignee so the researcher gets the wrap-up turn.
+        return ctx.task.get("assignee") or ctx.pick(role="researcher")
 
 
 class Reporting(Stage):
@@ -115,6 +137,7 @@ def research():
     return [
         Todo,
         Researching,
+        Paused,
         Reporting,
         Done,
         Cancelled,

@@ -43,7 +43,7 @@ def _broadcast_update(task_id: int, team: str, changes: dict) -> None:
         pass
 
 
-VALID_STATUSES = ("todo", "in_progress", "in_review", "in_approval", "merging", "done", "rejected", "merge_failed", "cancelled", "researching", "reporting")
+VALID_STATUSES = ("todo", "in_progress", "in_review", "in_approval", "merging", "done", "rejected", "merge_failed", "cancelled", "researching", "reporting", "paused")
 VALID_PRIORITIES = ("low", "medium", "high", "critical")
 VALID_APPROVAL_STATUSES = ("", "pending", "approved", "rejected")
 
@@ -58,7 +58,8 @@ VALID_TRANSITIONS = {
     "merge_failed": {"merging", "in_progress", "cancelled"},
     # Research workflow stages (primary validation via workflow engine;
     # these entries exist so legacy validation doesn't reject them)
-    "researching": {"reporting", "cancelled"},
+    "researching": {"reporting", "paused", "cancelled"},
+    "paused": {"researching", "done", "cancelled"},
     "reporting": {"done", "researching", "cancelled"},
     # Terminal states — no transitions out
     "done": set(),
