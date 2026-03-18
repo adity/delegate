@@ -22,6 +22,8 @@ Statuses: `todo` → `in_progress` → `in_review` → `in_approval` → `mergin
 
 Tasks are stored per-team in SQLite. Associate with one or more repos using `--repo` (repeatable for multi-repo tasks).
 
+**Two-tier task queries:** `task_list` returns a compact summary (id, title, status, assignee, priority) and excludes done/cancelled tasks by default. To see full details on a specific task — description, comments, branch, commits, attachments — use `task_show(task_id)`. Always prefer `task_list` for scanning, then `task_show` to drill into specific tasks.
+
 **Combined status + assignee changes**: When changing both status and assignee together (e.g., moving to `in_review` and reassigning to a reviewer), use the `--assignee` flag on `task status` to generate a single combined event instead of two separate events:
 ```
 python -m delegate.task status <home> <team> <task_id> in_review --assignee john

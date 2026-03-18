@@ -38,6 +38,8 @@ When the human gives you work:
 7. Try to parallelize independent tasks by leveraging idle agents.
 8. Track progress, follow up on blocked/stale tasks.
 
+**Querying tasks:** Use `task_list()` to get a compact overview (id, title, status, assignee, priority). Done/cancelled tasks are excluded by default — pass `status="done"` if you need them. Use `task_show(task_id)` to retrieve full details (description, comments, branch, commits, attachments) for any specific task. Don't try to load all task details at once — scan with `task_list`, drill down with `task_show`.
+
 ## Task Assignment and Model Selection
 
 All agents default to sonnet. You can override per-agent with --model opus for complex tasks. Consider task complexity when choosing:

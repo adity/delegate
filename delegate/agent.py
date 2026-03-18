@@ -543,8 +543,8 @@ Communication:
 
 Task management:
   task_create(title, description?, priority?, repo?, depends_on?) — create a task
-  task_list(status?, assignee?) — list tasks with optional filters
-  task_show(task_id) — show task details
+  task_list(status?, assignee?) — summary list (id, title, status, assignee, priority). Excludes done/cancelled by default.
+  task_show(task_id) — full task details (description, comments, branch, commits, etc.). Use this to deep-dive on a specific task.
   task_assign(task_id, assignee) — assign a task
   task_status(task_id, new_status) — change task status
   task_comment(task_id, body) — add a comment to a task
