@@ -1024,6 +1024,17 @@ async def run_turn(
             result.turns = 1
             error_occurred = True
             _mark_batch_processed(hc_home, team, batch)
+            # Invalidate the Telephone so the next turn gets a fresh
+            # subprocess — a fatal SDK error (e.g. JSON buffer overflow)
+            # leaves the cached Telephone in a broken state.
+            try:
+                logger.warning(
+                    "Removing broken telephone for %s/%s after fatal error: %s",
+                    team, agent, exc,
+                )
+                exchange.remove(team, agent)
+            except Exception:
+                logger.exception("Failed to remove telephone for %s/%s", team, agent)
     finally:
         try:
             end_session(
