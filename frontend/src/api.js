@@ -95,16 +95,26 @@ export async function fetchMessages(team, params) {
 }
 
 export async function sendMessage(team, recipient, content) {
-  const r = await fetch(`/teams/${team}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recipient, content }),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || r.statusText);
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 10000); // 10s timeout
+  try {
+    const r = await fetch(`/teams/${team}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipient, content }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    return r.json();
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("Message send timed out — please try again");
+    throw e;
+  } finally {
+    clearTimeout(timeout);
   }
-  return r.json();
 }
 
 export async function greetTeam(team, lastSeen = null) {

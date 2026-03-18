@@ -278,6 +278,7 @@ export function ChatPanel() {
   const searchTimerRef = useRef(null);
   const lastMsgTsRef = useRef("");
   const cooldownRef = useRef(false);
+  const isSendingRef = useRef(false);
   const isAtBottomRef = useRef(true);
   const wasAtBottomRef = useRef(true);
   const [showJumpBtn, setShowJumpBtn] = useState(false);
@@ -714,9 +715,12 @@ export function ChatPanel() {
     return () => { active = false; };
   }, [team]);
 
-  // Polling: fetch new messages every 2 seconds using `since`
+  // Polling: fetch new messages every 2 seconds using `since`.
+  // Uses setTimeout chain (not setInterval) to prevent connection stacking
+  // when the server is slow — only one poll in-flight at a time.
   useEffect(() => {
     if (!team) return;
+    let active = true;
     const poll = async () => {
       try {
         const newMsgs = await api.fetchMessages(team, { since: newestMsgTsRef.current });
@@ -737,11 +741,14 @@ export function ChatPanel() {
       } catch (e) {
         console.error("Polling error:", e);
       }
+      // Schedule next poll only after this one completes
+      if (active) pollingIntervalRef.current = setTimeout(poll, 2000);
     };
-    pollingIntervalRef.current = setInterval(poll, 2000);
+    pollingIntervalRef.current = setTimeout(poll, 2000);
     return () => {
+      active = false;
       if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
+        clearTimeout(pollingIntervalRef.current);
       }
     };
   }, [team]);
@@ -1097,6 +1104,7 @@ export function ChatPanel() {
   }, [team]);
 
   const handleSend = useCallback(async () => {
+    if (isSendingRef.current) return; // prevent double-submission
     if (mic.active) mic.toggle();
     const val = inputRef.current ? (inputRef.current.textContent || "").trim() : "";
     if (!val || !team) return;
@@ -1126,6 +1134,7 @@ export function ChatPanel() {
       if (target) setRecipient(target);
     }
     if (!target) return;
+    isSendingRef.current = true;
     cooldownRef.current = true;
     setTimeout(() => { cooldownRef.current = false; }, 4000);
     try {
@@ -1162,6 +1171,8 @@ export function ChatPanel() {
       });
     } catch (e) {
       showToast("Failed to send message", "error");
+    } finally {
+      isSendingRef.current = false;
     }
   }, [team, recipient, mic, executeCommand]);
 
