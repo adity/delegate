@@ -87,7 +87,7 @@ SENSITIVE_PATTERNS = [
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
 
 
-def _extract_diff_files(diff_text: str) -> set[str]:
+def extract_diff_files(diff_text: str) -> set[str]:
     """Extract file paths from a unified git diff."""
     files: set[str] = set()
     for m in _DIFF_FILE_RE.finditer(diff_text):
@@ -96,14 +96,14 @@ def _extract_diff_files(diff_text: str) -> set[str]:
     return files
 
 
-def _check_sensitive_files(diff_text: str) -> list[str]:
+def check_sensitive_files(diff_text: str) -> list[str]:
     """Return list of sensitive file paths found in the diff.
 
     Matches each file path against ``SENSITIVE_PATTERNS`` using
     case-insensitive fnmatch against both the full path and the
     basename (so ``".env"`` matches ``"config/.env"``).
     """
-    files = _extract_diff_files(diff_text)
+    files = extract_diff_files(diff_text)
     matched: list[str] = []
     for fpath in sorted(files):
         basename = fpath.rsplit("/", 1)[-1]
@@ -161,7 +161,7 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
     combined_diff = "\n\n".join(parts)
 
     # Sensitive file blocklist — require human review for these
-    sensitive = _check_sensitive_files(combined_diff)
+    sensitive = check_sensitive_files(combined_diff)
     if sensitive:
         logger.info(
             "auto_approve: skipping %s — diff touches sensitive files: %s",

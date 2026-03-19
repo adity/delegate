@@ -368,7 +368,8 @@ def _infer_exit_code(agent_dir: Path, handle: str) -> int:
     """Infer exit code when exitcode file is missing (process crashed hard).
 
     Heuristic: if stderr log contains common error patterns, assume failure.
-    Otherwise assume success (exit 0).
+    Otherwise assume failure (exit 1) — a process that can't write its own
+    exit code almost certainly didn't exit cleanly.
     """
     stderr_p = _stderr_path(agent_dir, handle)
     if stderr_p.exists():
@@ -383,4 +384,4 @@ def _infer_exit_code(agent_dir: Path, handle: str) -> int:
                 return 1
         except Exception:
             pass
-    return 0
+    return 1

@@ -2170,6 +2170,36 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
         return {"ok": True}
 
+    # --- Cleanup endpoints ---
+
+    @app.get("/teams/{team}/cleanup/preview")
+    def cleanup_preview(team: str, max_age: int = 14):
+        """Preview what cleanup would do for a team (dry-run)."""
+        from delegate.cleanup import preview_cleanup
+        preview = preview_cleanup(hc_home, team_name=team, max_age_days=max_age)
+        return preview.to_dict()
+
+    @app.post("/teams/{team}/cleanup")
+    def cleanup_team(team: str, max_age: int = 14):
+        """Execute cleanup for a team: prune old data, caches, logs, worktrees."""
+        from delegate.cleanup import run_cleanup
+        result = run_cleanup(hc_home, team_name=team, max_age_days=max_age)
+        return result.to_dict()
+
+    @app.get("/cleanup/preview")
+    def cleanup_preview_all(max_age: int = 14):
+        """Preview what cleanup would do across all teams (dry-run)."""
+        from delegate.cleanup import preview_cleanup
+        preview = preview_cleanup(hc_home, max_age_days=max_age)
+        return preview.to_dict()
+
+    @app.post("/cleanup")
+    def cleanup_all(max_age: int = 14):
+        """Execute cleanup across all teams."""
+        from delegate.cleanup import run_cleanup
+        result = run_cleanup(hc_home, max_age_days=max_age)
+        return result.to_dict()
+
     @app.get("/teams/{team}/default-cwd")
     def get_default_cwd(team: str):
         """Return the default working directory for shell commands in a team.

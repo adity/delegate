@@ -98,6 +98,13 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     Raises ``ImportError`` if ``claude_agent_sdk`` is not available.
     """
     from claude_agent_sdk import tool
+    from delegate.runtime import _sandbox_for_role, _read_state
+    from delegate.paths import agent_dir as _ad
+
+    # Resolve the agent's role so background commands respect the sandbox.
+    _agent_state = _read_state(_ad(hc_home, team, agent))
+    _agent_role = _agent_state.get("role", "engineer")
+    _, _denied_patterns = _sandbox_for_role(_agent_role)
 
     # -----------------------------------------------------------------------
     # Mailbox tools
@@ -704,7 +711,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         try:
             import subprocess
             from delegate.task import get_task, get_task_diff as _get_task_diff, format_task_id
-            from delegate.auto_approve import _check_sensitive_files, MAX_DIFF_CHARS
+            from delegate.auto_approve import check_sensitive_files, MAX_DIFF_CHARS
             from delegate.repo import get_default_branch, get_task_worktree_path
 
             task_id = args["task_id"]
@@ -732,7 +739,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             combined_diff = "\n\n".join(parts)
 
             # Check sensitive files
-            sensitive = _check_sensitive_files(combined_diff)
+            sensitive = check_sensitive_files(combined_diff)
 
             # Check if branch is behind main
             rebase_needed = False
@@ -1046,6 +1053,15 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             from delegate.background import launch
             from delegate.paths import agent_dir as _agent_dir
 
+            # Enforce the same sandbox deny-list as the Bash tool.
+            cmd = args["command"]
+            cmd_upper = cmd.upper()
+            for pattern in _denied_patterns:
+                if pattern.upper() in cmd_upper:
+                    return _error_result(
+                        f"Command blocked by sandbox policy: contains '{pattern}'"
+                    )
+
             ad = _agent_dir(hc_home, team, agent)
             max_runtime = (args.get("max_hours") or 4) * 3600
 
@@ -1091,13 +1107,15 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     )
     async def check_background(args: dict) -> dict:
         try:
+            import asyncio
             from delegate.background import check, tail as bg_tail
             from delegate.paths import agent_dir as _agent_dir
 
             ad = _agent_dir(hc_home, team, agent)
             handle = args["handle"]
 
-            info = check(ad, handle)
+            # check() may block (time.sleep during timeout kill)
+            info = await asyncio.to_thread(check, ad, handle)
             if info is None:
                 return _error_result(f"Unknown background process handle: {handle}")
 
@@ -1138,11 +1156,13 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     )
     async def cancel_background(args: dict) -> dict:
         try:
+            import asyncio
             from delegate.background import cancel
             from delegate.paths import agent_dir as _agent_dir
 
             ad = _agent_dir(hc_home, team, agent)
-            info = cancel(ad, args["handle"])
+            # cancel() calls _kill_process which blocks with time.sleep(0.5)
+            info = await asyncio.to_thread(cancel, ad, args["handle"])
             if info is None:
                 return _error_result(f"Unknown background process handle: {args['handle']}")
             return _text_result(f"Process {info.handle} cancelled (was pid {info.pid})")

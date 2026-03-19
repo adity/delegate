@@ -20,6 +20,7 @@ Commands:
     delegate workflow update-actions <team> <name> <path> — update workflow actions
     delegate workflow init <team>                    — register built-in default workflow
     delegate self-update                             — update delegate from source repo
+    delegate cleanup [--team X] [--max-age N] [--dry-run] — reclaim disk space (caches, logs, old data)
     delegate nuke                                    — destroy all delegate state (requires confirmation)
 """
 
@@ -259,6 +260,41 @@ def team() -> None:
     pass
 
 
+def _update_roster_with_new_agents(
+    hc_home: Path,
+    team_name: str,
+    new_parsed_agents: list[tuple[str, str]],
+    existing_agent_names: set[str],
+) -> None:
+    """Rewrite the roster to include both existing and newly added agents."""
+    import yaml
+    from delegate.bootstrap import make_roster
+    from delegate.config import get_human_members
+    from delegate.paths import roster_path, agents_dir
+
+    # Build merged member list starting with manager
+    all_members: list[tuple[str, str]] = [("delegate", "manager")]
+
+    # Add existing agents with their actual roles from state.yaml
+    adir = agents_dir(hc_home, team_name)
+    for agent_name in sorted(existing_agent_names):
+        state_file = adir / agent_name / "state.yaml"
+        role = "engineer"
+        if state_file.exists():
+            state = yaml.safe_load(state_file.read_text()) or {}
+            role = state.get("role", "engineer")
+        all_members.append((agent_name, role))
+
+    # Add new agents from the current call
+    for aname, arole in new_parsed_agents:
+        if aname not in existing_agent_names:
+            all_members.append((aname, arole))
+
+    human_names = [m["name"] for m in get_human_members(hc_home)]
+    rp = roster_path(hc_home, team_name)
+    rp.write_text(make_roster(all_members, humans=human_names))
+
+
 @team.command("add")
 @click.argument("name")
 @click.option(
@@ -377,6 +413,12 @@ def team_create(
                 f"Invalid --model value '{model_stripped}'. Use 'opus', 'sonnet', or 'name:model' pairs."
             )
 
+    # Detect whether the team already exists before bootstrap
+    from delegate.paths import team_dir as _team_dir_resolved
+    from delegate.runtime import list_ai_agents
+    team_existed = _team_dir_resolved(hc_home, name).is_dir()
+    existing_agents = set(list_ai_agents(hc_home, name)) if team_existed else set()
+
     bootstrap(
         hc_home,
         team_name=name,
@@ -386,7 +428,18 @@ def team_create(
         models=models_dict,
     )
 
-    success(f"Created team '{name}'")
+    # Accurate messaging: created vs updated
+    new_agent_names = [n for n, _ in parsed_agents if n not in existing_agents]
+    if team_existed:
+        if new_agent_names:
+            success(f"Updated team '{name}' — added agent(s): {', '.join(new_agent_names)}")
+            # Update roster to include both old and new members
+            _update_roster_with_new_agents(hc_home, name, parsed_agents, existing_agents)
+        else:
+            from delegate.fmt import info
+            info(f"Team '{name}' already exists (no changes)")
+    else:
+        success(f"Created team '{name}'")
 
     # Register the built-in default workflow
     try:
@@ -1419,6 +1472,132 @@ def config_set_passphrase(ctx: click.Context, value: str | None, disable: bool) 
         success("Web UI passphrase set")
     else:
         raise click.ClickException("Provide a passphrase value or use --disable")
+
+
+# ──────────────────────────────────────────────────────────────
+# delegate cleanup
+# ──────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option("--team", default=None, help="Limit cleanup to a specific team.")
+@click.option("--max-age", default=14, type=int, show_default=True,
+              help="Days to keep — records older than this are pruned.")
+@click.option("--dry-run", is_flag=True, help="Preview what would be cleaned without making changes.")
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+@click.option("--no-db", is_flag=True, help="Skip database pruning.")
+@click.option("--no-worktrees", is_flag=True, help="Skip worktree removal.")
+@click.option("--no-venvs", is_flag=True, help="Skip .venv removal.")
+@click.option("--no-caches", is_flag=True, help="Skip package cache cleanup.")
+@click.option("--no-logs", is_flag=True, help="Skip log file pruning.")
+@click.pass_context
+def cleanup(
+    ctx: click.Context,
+    team: str | None,
+    max_age: int,
+    dry_run: bool,
+    yes: bool,
+    no_db: bool,
+    no_worktrees: bool,
+    no_venvs: bool,
+    no_caches: bool,
+    no_logs: bool,
+) -> None:
+    """Reclaim disk space by pruning stale data, caches, and logs.
+
+    Removes old database records (sessions, messages, reviews), stale git
+    worktrees for completed tasks, package caches, virtual environments
+    in worktree directories, and rotated log files.
+
+    Use --dry-run to preview what would be cleaned without making changes.
+    Use --team to limit cleanup to a specific team.
+
+    \b
+    Examples:
+        delegate cleanup --dry-run          # preview everything
+        delegate cleanup --team myteam      # clean one team only
+        delegate cleanup --max-age 7        # aggressive: prune after 7 days
+        delegate cleanup --no-db            # skip DB pruning, clean only files
+    """
+    from delegate.cleanup import preview_cleanup, run_cleanup
+    from delegate.fmt import success, info, warn, header
+
+    hc_home = _get_home(ctx)
+
+    if dry_run:
+        header("Cleanup preview")
+        if team:
+            info(f"Team: {team}")
+        info(f"Max age: {max_age} days")
+        click.echo()
+
+        preview = preview_cleanup(hc_home, team_name=team, max_age_days=max_age)
+
+        info(f"Stale sessions:   {preview.stale_sessions}")
+        info(f"Stale messages:   {preview.stale_messages}")
+        info(f"Stale reviews:    {preview.stale_reviews}")
+        info(f"Stale worktrees:  {len(preview.stale_worktrees)}")
+        for wt in preview.stale_worktrees:
+            click.echo(f"      {wt}")
+        info(f"Venv directories: {len(preview.venv_dirs)}")
+        for v in preview.venv_dirs:
+            click.echo(f"      {v}")
+        info(f"Package caches:   {preview.pkg_cache_bytes / (1024 * 1024):.1f} MB")
+        info(f"Stale log files:  {preview.stale_log_files}")
+        info(f"Daemon log files: {preview.daemon_log_files}")
+        info(f"Database size:    {preview.db_size / (1024 * 1024):.1f} MB")
+        click.echo()
+        success(f"Estimated reclaimable: {preview.total_bytes_reclaimable / (1024 * 1024):.1f} MB")
+        click.echo()
+        info("Run without --dry-run to execute cleanup.")
+        return
+
+    # Confirmation
+    if not yes:
+        scope = f"team '{team}'" if team else "all teams"
+        click.confirm(
+            f"Clean up {scope}? (max age: {max_age} days, this cannot be undone)",
+            abort=True,
+        )
+
+    result = run_cleanup(
+        hc_home,
+        team_name=team,
+        max_age_days=max_age,
+        prune_db=not no_db,
+        prune_worktrees=not no_worktrees,
+        prune_venvs=not no_venvs,
+        prune_caches=not no_caches,
+        prune_logs=not no_logs,
+    )
+
+    header("Cleanup complete")
+    info(f"Freed: {result.bytes_freed / (1024 * 1024):.1f} MB")
+    if result.sessions_deleted:
+        info(f"Sessions pruned:    {result.sessions_deleted}")
+    if result.messages_deleted:
+        info(f"Messages pruned:    {result.messages_deleted}")
+    if result.reviews_deleted:
+        info(f"Reviews pruned:     {result.reviews_deleted}")
+    if result.worktrees_removed:
+        info(f"Worktrees removed:  {result.worktrees_removed}")
+    if result.venvs_removed:
+        info(f"Venvs removed:      {result.venvs_removed}")
+    if result.pkg_caches_cleared:
+        info(f"Caches cleared:     {result.pkg_caches_cleared}")
+    if result.log_files_removed:
+        info(f"Log files removed:  {result.log_files_removed}")
+    if result.daemon_logs_removed:
+        info(f"Daemon logs removed:{result.daemon_logs_removed}")
+    if result.db_size_before and result.db_size_after:
+        info(f"DB: {result.db_size_before / (1024 * 1024):.1f} MB → {result.db_size_after / (1024 * 1024):.1f} MB")
+
+    if result.errors:
+        click.echo()
+        warn(f"{len(result.errors)} error(s) during cleanup:")
+        for err in result.errors:
+            click.echo(f"    {err}")
+
+    success("Done.")
 
 
 # ──────────────────────────────────────────────────────────────

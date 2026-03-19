@@ -19,8 +19,8 @@ from delegate.config import (
 )
 from delegate.auto_approve import (
     auto_approve_once,
-    _extract_diff_files,
-    _check_sensitive_files,
+    extract_diff_files,
+    check_sensitive_files,
 )
 
 
@@ -298,7 +298,7 @@ class TestAutoApproveOnce:
 # --- Sensitive file detection tests ---
 
 class TestSensitiveFileDetection:
-    """Unit tests for _extract_diff_files and _check_sensitive_files."""
+    """Unit tests for extract_diff_files and check_sensitive_files."""
 
     def test_extract_diff_files(self):
         diff = (
@@ -307,12 +307,12 @@ class TestSensitiveFileDetection:
             "diff --git a/README.md b/README.md\n"
             "--- a/README.md\n+++ b/README.md\n"
         )
-        files = _extract_diff_files(diff)
+        files = extract_diff_files(diff)
         assert files == {"src/app.py", "README.md"}
 
     def test_extract_renamed_file(self):
         diff = "diff --git a/old_name.py b/new_name.py\n"
-        files = _extract_diff_files(diff)
+        files = extract_diff_files(diff)
         assert "old_name.py" in files
         assert "new_name.py" in files
 
@@ -321,7 +321,7 @@ class TestSensitiveFileDetection:
                       ".cursorrules", ".claude/instructions.md",
                       ".github/copilot-instructions.md"]:
             diff = f"diff --git a/{name} b/{name}\n"
-            matched = _check_sensitive_files(diff)
+            matched = check_sensitive_files(diff)
             assert matched, f"Expected {name} to be blocked"
 
     def test_ci_files_blocked(self):
@@ -329,20 +329,20 @@ class TestSensitiveFileDetection:
                       ".gitlab-ci.yml", "Jenkinsfile", ".circleci/config.yml",
                       ".travis.yml"]:
             diff = f"diff --git a/{name} b/{name}\n"
-            matched = _check_sensitive_files(diff)
+            matched = check_sensitive_files(diff)
             assert matched, f"Expected {name} to be blocked"
 
     def test_secret_files_blocked(self):
         for name in [".env", ".env.production", "server.pem", "private.key",
                       "credentials.json", "secrets.yaml"]:
             diff = f"diff --git a/{name} b/{name}\n"
-            matched = _check_sensitive_files(diff)
+            matched = check_sensitive_files(diff)
             assert matched, f"Expected {name} to be blocked"
 
     def test_nested_env_blocked(self):
         """A .env file in a subdirectory should still be blocked."""
         diff = "diff --git a/config/.env b/config/.env\n"
-        matched = _check_sensitive_files(diff)
+        matched = check_sensitive_files(diff)
         assert matched
         assert "config/.env" in matched
 
@@ -350,14 +350,14 @@ class TestSensitiveFileDetection:
         for name in ["Dockerfile", "Dockerfile.prod", "docker-compose.yml",
                       "docker-compose.override.yaml"]:
             diff = f"diff --git a/{name} b/{name}\n"
-            matched = _check_sensitive_files(diff)
+            matched = check_sensitive_files(diff)
             assert matched, f"Expected {name} to be blocked"
 
     def test_delegate_files_blocked(self):
         for name in ["override.md", ".delegate/setup.sh", ".delegate/premerge.sh",
                       "setup.sh", "premerge.sh"]:
             diff = f"diff --git a/{name} b/{name}\n"
-            matched = _check_sensitive_files(diff)
+            matched = check_sensitive_files(diff)
             assert matched, f"Expected {name} to be blocked"
 
     def test_normal_files_not_blocked(self):
@@ -368,9 +368,9 @@ class TestSensitiveFileDetection:
             "diff --git a/README.md b/README.md\n"
             "diff --git a/package.json b/package.json\n"
         )
-        matched = _check_sensitive_files(diff)
+        matched = check_sensitive_files(diff)
         assert matched == []
 
     def test_empty_diff(self):
-        assert _check_sensitive_files("") == []
-        assert _extract_diff_files("") == set()
+        assert check_sensitive_files("") == []
+        assert extract_diff_files("") == set()
