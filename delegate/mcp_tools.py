@@ -85,6 +85,135 @@ def _format_duration(seconds: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Live system resource collection (used by check_resources MCP tool)
+# ---------------------------------------------------------------------------
+
+
+def _parse_nvsmi_value(s: str) -> float | None:
+    """Parse a nvidia-smi CSV value like '8 %' or '1791 MiB' into a float."""
+    s = s.strip()
+    if not s or s == "[N/A]":
+        return None
+    # Strip non-numeric suffix (e.g. " %", " MiB", " W")
+    parts = s.split()
+    try:
+        return float(parts[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _read_cpu_times() -> list[int]:
+    """Read aggregate CPU jiffies from ``/proc/stat`` (first line)."""
+    with open("/proc/stat") as f:
+        line = f.readline()  # "cpu  user nice sys idle ..."
+    return [int(v) for v in line.split()[1:]]
+
+
+def _collect_live_resources() -> dict:
+    """Collect live system utilization — CPU, RAM, GPU(s), disk.
+
+    Designed for Linux.  Each section is independently guarded so a
+    failure in one (e.g. no nvidia-smi) doesn't break the others.
+    All sections return the full key structure with ``None`` values on
+    error so consumers never hit ``KeyError``.
+    """
+    import os
+    import shutil
+    import subprocess
+    import time
+
+    result: dict = {}
+
+    # --- CPU (two-sample /proc/stat with 0.1s gap) ---
+    try:
+        t1 = _read_cpu_times()
+        time.sleep(0.1)
+        t2 = _read_cpu_times()
+
+        delta = [b - a for a, b in zip(t1, t2)]
+        total = sum(delta)
+        # idle is index 3, iowait is index 4
+        idle = delta[3] + (delta[4] if len(delta) > 4 else 0)
+        util = round(100.0 * (1 - idle / total), 1) if total > 0 else 0.0
+
+        result["cpu"] = {
+            "utilization_pct": util,
+            "core_count": os.cpu_count() or 0,
+        }
+    except Exception:
+        result["cpu"] = {"utilization_pct": None, "core_count": os.cpu_count() or 0}
+
+    # --- RAM (/proc/meminfo) ---
+    try:
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if parts[0] in ("MemTotal:", "MemAvailable:"):
+                    mem[parts[0].rstrip(":")] = int(parts[1])  # kB
+                if len(mem) == 2:
+                    break
+        total_kb = mem["MemTotal"]
+        avail_kb = mem["MemAvailable"]
+        used_kb = total_kb - avail_kb
+        result["ram"] = {
+            "total_gb": round(total_kb / 1048576, 1),
+            "used_gb": round(used_kb / 1048576, 1),
+            "available_gb": round(avail_kb / 1048576, 1),
+            "percent": round(100.0 * used_kb / total_kb, 1) if total_kb else 0.0,
+        }
+    except Exception:
+        result["ram"] = {
+            "total_gb": None, "used_gb": None, "available_gb": None, "percent": None,
+        }
+
+    # --- GPUs (nvidia-smi) ---
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,temperature.gpu,utilization.gpu,"
+                "memory.used,memory.total,power.draw",
+                "--format=csv,noheader",
+            ],
+            capture_output=True, text=True, timeout=3,
+        )
+        gpus = []
+        if proc.returncode == 0:
+            for line in proc.stdout.strip().splitlines():
+                fields = [f.strip() for f in line.split(",")]
+                if len(fields) >= 7:
+                    gpus.append({
+                        "index": int(fields[0]) if fields[0].isdigit() else 0,
+                        "name": fields[1],
+                        "temperature_c": _parse_nvsmi_value(fields[2]),
+                        "utilization_pct": _parse_nvsmi_value(fields[3]),
+                        "memory_used_mib": _parse_nvsmi_value(fields[4]),
+                        "memory_total_mib": _parse_nvsmi_value(fields[5]),
+                        "power_draw_w": _parse_nvsmi_value(fields[6]),
+                    })
+        result["gpus"] = gpus
+    except Exception:
+        result["gpus"] = []
+
+    # --- Disk ---
+    try:
+        usage = shutil.disk_usage("/")
+        result["disk"] = {
+            "total_gb": round(usage.total / (1 << 30)),
+            "used_gb": round(usage.used / (1 << 30)),
+            "free_gb": round(usage.free / (1 << 30)),
+            "percent": round(100.0 * usage.used / usage.total, 1) if usage.total else 0.0,
+        }
+    except Exception:
+        result["disk"] = {
+            "total_gb": None, "used_gb": None, "free_gb": None, "percent": None,
+        }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Tool factory — builds all MCP tools for a given agent context
 # ---------------------------------------------------------------------------
 
@@ -1201,6 +1330,28 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             logger.exception("list_background failed")
             return _error_result(str(e))
 
+    # -----------------------------------------------------------------------
+    # System resource tools
+    # -----------------------------------------------------------------------
+
+    @tool(
+        "check_resources",
+        "Check live system resource utilization: CPU, RAM, disk, and per-GPU "
+        "stats (utilization %, VRAM, temperature, power). Returns structured "
+        "JSON — use this instead of parsing nvidia-smi or /proc manually. "
+        "Call before launching compute-heavy work to pick the best GPU or "
+        "verify available memory.",
+        {"type": "object", "properties": {}},
+    )
+    async def check_resources(args: dict) -> dict:
+        try:
+            import asyncio
+            data = await asyncio.to_thread(_collect_live_resources)
+            return _json_result(data)
+        except Exception as e:
+            logger.exception("check_resources failed")
+            return _error_result(str(e))
+
     return [
         mailbox_send,
         mailbox_inbox,
@@ -1225,6 +1376,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         check_background,
         cancel_background,
         list_background,
+        check_resources,
     ]
 
 

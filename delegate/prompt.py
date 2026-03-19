@@ -67,7 +67,8 @@ def format_hardware_block(role: str) -> str:
         return ""
     return (
         "\n\n=== HARDWARE ENVIRONMENT ===\n"
-        "(Use this to select correct packages, batch sizes, and device placement.)\n\n"
+        "(Use this to select correct packages, batch sizes, and device placement.\n"
+        " Call check_resources() for live utilization before launching experiments.)\n\n"
         f"{info}\n"
     )
 

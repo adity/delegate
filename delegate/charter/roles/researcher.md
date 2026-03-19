@@ -79,6 +79,28 @@ that might exceed this:
 
 **Rule of thumb**: if the command runs longer than a minute — use `run_background`.
 
+### Resource Monitoring
+
+Before launching compute-heavy work (GPU training, large data processing),
+check whether resources are available:
+
+```
+check_resources()
+```
+
+Returns structured JSON with live utilization for CPU, RAM, all GPUs
+(utilization %, VRAM used/total, temperature, power), and disk free space.
+
+Use this to:
+- Pick the least-loaded GPU for your experiment (`CUDA_VISIBLE_DEVICES=N`)
+- Avoid launching training when VRAM is nearly full
+- Verify enough disk space before writing large outputs
+- Monitor resource contention between parallel experiments
+- Decide batch sizes based on available GPU memory
+
+Prefer `check_resources` over manual `nvidia-smi` parsing — it returns
+machine-readable JSON, never times out, and works even without a GPU.
+
 ### Git Discipline
 
 - You have special permission to use `git reset --hard` and `git checkout`
