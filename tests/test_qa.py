@@ -92,8 +92,7 @@ def qa_team_with_task(qa_team):
     hc_home, repo_path = qa_team
 
     # Create a task and move it through the workflow to 'in_review'
-    task = create_task(hc_home, TEAM, title="Add multiply feature", assignee="manager", repo="myapp")
-    assign_task(hc_home, TEAM, task["id"], "alice")
+    task = create_task(hc_home, TEAM, title="Add multiply feature", assignee="alice", repo="myapp")
     change_status(hc_home, TEAM, task["id"], "in_progress")
     change_status(hc_home, TEAM, task["id"], "in_review")
 

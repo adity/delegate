@@ -164,6 +164,21 @@ def create_task(
     else:
         repo_list = list(repo)
 
+    # Guard: the manager agent must never be DRI on tasks with repos.
+    # The manager operates in the main working directory (via symlink) and
+    # has no isolated worktree — being DRI would cause branch checkouts
+    # directly in the user's main repo.
+    if repo_list:
+        from delegate.bootstrap import get_member_by_role
+        manager_name = get_member_by_role(hc_home, team, "manager")
+        if manager_name and assignee.strip() == manager_name:
+            raise ValueError(
+                f"Cannot assign a repo task to the manager agent "
+                f"({manager_name!r}). The manager has no worktree isolation "
+                f"and would check out branches in the main working directory. "
+                f"Assign to a worker agent instead."
+            )
+
     # Resolve workflow version
     if workflow_version is None:
         from delegate.workflow import get_latest_version
@@ -410,6 +425,21 @@ def assign_task(hc_home: Path, team: str, task_id: int, assignee: str, suppress_
         suppress_log: If True, skip logging the assignment event (default: False)
     """
     task = get_task(hc_home, team, task_id)
+
+    # Guard: prevent the manager from becoming DRI on repo tasks.
+    # DRI is set on first assignment and never changes — if the manager
+    # becomes DRI, all CURRENT_TASK sessions will operate in the main
+    # working directory instead of an isolated worktree.
+    if not task.get("dri") and task.get("repo"):
+        from delegate.bootstrap import get_member_by_role
+        manager_name = get_member_by_role(hc_home, team, "manager")
+        if manager_name and assignee.strip() == manager_name:
+            raise ValueError(
+                f"Cannot set manager agent ({manager_name!r}) as DRI on a "
+                f"repo task ({format_task_id(task_id)}). The manager has no "
+                f"worktree isolation. Assign to a worker agent instead."
+            )
+
     updates: dict[str, str] = {"assignee": assignee}
     if not task.get("dri"):
         updates["dri"] = assignee
