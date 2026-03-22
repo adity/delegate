@@ -62,6 +62,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -427,14 +429,42 @@ class Telephone:
         # Reset conversation so agent starts fresh on next turn
         self.reset()
 
+    @staticmethod
+    def _force_kill_client(client: Any) -> None:
+        """Best-effort SIGKILL of the subprocess behind a ClaudeSDKClient.
+
+        Called as a fallback when the normal disconnect() path fails to
+        terminate the process.  Reaches into the SDK internals to find
+        the PID — fragile, but necessary to prevent runaway process leaks.
+        """
+        try:
+            transport = getattr(client, "_transport", None) or getattr(
+                getattr(client, "_query", None), "transport", None
+            )
+            proc = getattr(transport, "_process", None) if transport else None
+            if proc is None:
+                return
+            pid = getattr(proc, "pid", None) or getattr(proc, "process", {}).get("pid")
+            if pid and isinstance(pid, int):
+                logger.info("Force-killing leaked Claude subprocess PID %d", pid)
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass  # already dead — fine
+        except Exception:
+            logger.debug("_force_kill_client failed", exc_info=True)
+
+    async def _disconnect_client(self, client: Any) -> None:
+        """Disconnect a single SDK client, falling back to SIGKILL."""
+        try:
+            await client.disconnect()
+        except Exception:
+            self._force_kill_client(client)
+
     async def close(self) -> None:
         """Disconnect the SDK client and release the subprocess."""
         for client in (self._client, self._stale_client):
             if client is not None:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                await self._disconnect_client(client)
         self._client = None
         self._stale_client = None
 
@@ -629,17 +659,16 @@ class Telephone:
         """Lazily connect a ``ClaudeSDKClient``, creating one if needed.
 
         Also cleans up any stale client left over from a prior
-        ``reset()``.
+        ``reset()``.  Uses SIGKILL as a fallback if the normal
+        disconnect path fails — this prevents the runaway subprocess
+        leak that previously accumulated hundreds of orphaned processes.
         """
         if self._client is not None:
             return
 
         # Disconnect the old subprocess from a previous generation.
         if self._stale_client is not None:
-            try:
-                await self._stale_client.disconnect()
-            except Exception:
-                pass
+            await self._disconnect_client(self._stale_client)
             self._stale_client = None
 
         from claude_agent_sdk import ClaudeSDKClient

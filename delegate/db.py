@@ -641,17 +641,29 @@ def ensure_schema(hc_home: Path, team: str = "") -> None:
 
 
 def get_connection(hc_home: Path, team: str = "") -> sqlite3.Connection:
-    """Open a connection to the global DB with row_factory and ensure schema is current.
+    """Open a connection to the global DB with row_factory.
 
     Callers are responsible for closing the connection.
 
+    Schema migrations are applied once at startup (``ensure_schema()`` is
+    called from ``create_app`` and ``start_daemon``).  Calling it on every
+    connection was a major bottleneck — the threading lock in
+    ``ensure_schema`` caused contention with dozens of concurrent agents.
+
     Note: team parameter is kept for backward compatibility but is no longer used.
     """
-    ensure_schema(hc_home, team)
+    # Fast-path: only run ensure_schema if it hasn't been verified yet.
+    # After the first successful check the _schema_verified dict is populated
+    # and the fast-path in ensure_schema returns immediately without locking,
+    # but even the dict lookup + function-call overhead matters at 100+ agents.
+    key = str(hc_home)
+    if _schema_verified.get(key) != len(MIGRATIONS):
+        ensure_schema(hc_home, team)
     path = global_db_path(hc_home)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

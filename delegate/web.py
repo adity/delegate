@@ -31,6 +31,7 @@ as asyncio tasks when agents have unread messages.
 import asyncio
 import base64
 import contextlib
+import functools
 import json
 import logging
 import mimetypes
@@ -38,6 +39,7 @@ import os
 import shutil
 import signal as signal_mod
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,6 +67,22 @@ from delegate.task import list_tasks as _list_tasks, get_task as _get_task, get_
 from delegate.chat import get_messages as _get_messages, get_task_stats as _get_task_stats, get_agent_stats as _get_agent_stats, get_team_agent_stats as _get_team_agent_stats, log_event as _log_event
 from delegate.mailbox import send as _send, read_inbox as _read_inbox, read_outbox as _read_outbox, count_unread as _count_unread
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Dedicated thread-pool for DB / file-IO operations.
+#
+# The default asyncio executor is shared by *everything* — using a dedicated
+# pool prevents DB-heavy agent turns from starving HTTP handlers and other
+# async work.  16 threads is a good balance: SQLite WAL allows concurrent
+# readers and the busy_timeout handles writer contention.
+# ---------------------------------------------------------------------------
+_db_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="delegate-db")
+
+
+async def _run_in_db_pool(fn, *args, **kwargs):
+    """Run *fn(*args, **kwargs)* in the dedicated DB/IO thread pool."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_db_pool, functools.partial(fn, *args, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +781,7 @@ async def _daemon_loop(
     human_names = [m["name"] for m in get_human_members(hc_home)]
 
     sem = asyncio.Semaphore(max_concurrent)
-    merge_sem = asyncio.Semaphore(1)
+    merge_sems: dict[str, asyncio.Semaphore] = {}  # per-team merge semaphores
     in_flight: set[tuple[str, str]] = set()  # (team, agent) pairs currently running
     in_flight_lock = asyncio.Lock()  # guards check-then-add on in_flight
 
@@ -852,6 +870,102 @@ async def _daemon_loop(
     # is looking at the screen. Frontend uses localStorage to track last-greeted
     # timestamp and only triggers greeting after meaningful absence (30+ min).
 
+    # --- Per-team processing (runs concurrently across teams) ---
+    async def _process_team(team: str) -> None:
+        """Handle infra, dispatch, and auto-stages for one team.
+
+        Called concurrently for every team via asyncio.gather() so that
+        slow worktree creation in one team doesn't block dispatch in others.
+        """
+        if _shutdown_flag:
+            return
+
+        # --- Ensure worktree infrastructure for active tasks ---
+        try:
+            await _run_in_db_pool(
+                _ensure_task_infra, hc_home, team, infra_ready,
+            )
+        except Exception:
+            logger.exception("Error ensuring task infra for team %s", team)
+
+        # Find agents with unread messages and dispatch turns.
+        # Both DB queries run in the dedicated thread pool so the
+        # event loop stays free for HTTP / SSE traffic.
+        ai_agents = set(await _run_in_db_pool(list_ai_agents, hc_home, team))
+        unread_prioritized = await _run_in_db_pool(
+            agents_with_unread_prioritized, hc_home, team, human_names,
+        )
+        needing_turn = [
+            a for a in unread_prioritized
+            if a in ai_agents and _is_local_agent(hc_home, team, a)
+        ]
+        for agent in needing_turn:
+            if _shutdown_flag:
+                break
+
+            key = (team, agent)
+            async with in_flight_lock:
+                if key in in_flight:
+                    continue
+                in_flight.add(key)
+            agent_task = asyncio.create_task(_dispatch_turn(team, agent))
+            _active_agent_tasks[key] = agent_task
+            agent_task.add_done_callback(lambda t, k=key: _active_agent_tasks.pop(k, None))
+
+        # Clear recently_dispatched every 5 minutes
+        nonlocal last_dispatch_clear
+        now_d = _time.monotonic()
+        if now_d - last_dispatch_clear > 300:
+            recently_dispatched.clear()
+            last_dispatch_clear = now_d
+
+        # Process auto stages — per-team semaphore so different teams
+        # can merge/approve in parallel (previously a single global sem
+        # serialized all teams).
+        if not _shutdown_flag:
+            team_merge_sem = merge_sems.setdefault(team, asyncio.Semaphore(1))
+
+            async def _run_auto_stages(t: str) -> None:
+                async with team_merge_sem:
+                    reviewer_name = await _run_in_db_pool(
+                        get_member_by_role, hc_home, t, "reviewer",
+                    )
+                    if reviewer_name:
+                        try:
+                            _dispatch_review_request(
+                                hc_home, t, reviewer_name, recently_dispatched,
+                            )
+                        except Exception:
+                            logger.debug("_dispatch_review_request error for %s", t, exc_info=True)
+                    else:
+                        from delegate.auto_approve import auto_approve_once
+                        try:
+                            await _run_in_db_pool(auto_approve_once, hc_home, t)
+                        except Exception:
+                            logger.debug("auto_approve_once error for %s", t, exc_info=True)
+
+                    results = await _run_in_db_pool(merge_once, hc_home, t)
+                    for mr in results:
+                        if mr.success:
+                            logger.info("Merged %s in %s: %s", mr.task_id, t, mr.message)
+                            infra_ready.discard((t, mr.task_id))
+                            _notify_manager(
+                                t,
+                                f"Task {format_task_id(mr.task_id)} has been merged successfully. Check status of tasks and agents -- make any necessary assignment decisions.",
+                            )
+                        else:
+                            logger.warning("Merge failed %s in %s: %s", mr.task_id, t, mr.message)
+                            _notify_manager(
+                                t,
+                                f"Task {format_task_id(mr.task_id)} merge failed: {mr.message}",
+                            )
+
+                    await _run_in_db_pool(_process_auto_stages, hc_home, t)
+
+            merge_task = asyncio.create_task(_run_auto_stages(team))
+            _active_merge_tasks.add(merge_task)
+            merge_task.add_done_callback(_active_merge_tasks.discard)
+
     # --- Main loop ---
     while True:
         try:
@@ -861,114 +975,26 @@ async def _daemon_loop(
                 logger.info("Shutdown flag set — exiting daemon loop")
                 break
 
-            teams = _list_teams(hc_home)
+            teams = await _run_in_db_pool(_list_teams, hc_home)
             human_name = get_default_human(hc_home)
 
-            for team in teams:
-                # Check shutdown flag before dispatching new tasks
-                if _shutdown_flag:
-                    break
-
-                # --- Ensure worktree infrastructure for active tasks ---
-                # Runs in a thread (unsandboxed daemon process) before any
-                # agent turns are dispatched, so worktrees are guaranteed
-                # to exist by the time an agent receives a turn.
-                try:
-                    await asyncio.to_thread(
-                        _ensure_task_infra, hc_home, team, infra_ready,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Error ensuring task infra for team %s", team,
-                    )
-
-                # Find agents with unread messages and dispatch turns
-                # Skip agents assigned to satellites (host != None)
-                ai_agents = set(list_ai_agents(hc_home, team))
-                needing_turn = [
-                    a for a in agents_with_unread_prioritized(hc_home, team, human_names)
-                    if a in ai_agents and _is_local_agent(hc_home, team, a)
-                ]
-                for agent in needing_turn:
-                    # Check shutdown flag before dispatching
-                    if _shutdown_flag:
-                        break
-
-                    key = (team, agent)
-                    async with in_flight_lock:
-                        if key in in_flight:
-                            continue
-                        in_flight.add(key)
-                    agent_task = asyncio.create_task(_dispatch_turn(team, agent))
-                    _active_agent_tasks[key] = agent_task
-                    agent_task.add_done_callback(lambda t, k=key: _active_agent_tasks.pop(k, None))
-
-                # Clear recently_dispatched every 5 minutes
-                now_d = _time.monotonic()
-                if now_d - last_dispatch_clear > 300:
-                    recently_dispatched.clear()
-                    last_dispatch_clear = now_d
-
-                # Process auto stages (merge, etc.) — serialized, one at a time
-                if not _shutdown_flag:
-                    async def _run_auto_stages(t: str) -> None:
-                        async with merge_sem:
-                            # Auto-approve: dispatch to reviewer agent if one exists,
-                            # otherwise fall back to LLM judge in-process.
-                            reviewer_name = get_member_by_role(hc_home, t, "reviewer")
-                            if reviewer_name:
-                                try:
-                                    _dispatch_review_request(
-                                        hc_home, t, reviewer_name, recently_dispatched,
-                                    )
-                                except Exception:
-                                    logger.debug("_dispatch_review_request error for %s", t, exc_info=True)
-                            else:
-                                from delegate.auto_approve import auto_approve_once
-                                try:
-                                    await asyncio.to_thread(auto_approve_once, hc_home, t)
-                                except Exception:
-                                    logger.debug("auto_approve_once error for %s", t, exc_info=True)
-
-                            # Legacy merge path (for tasks without workflow).
-                            results = await asyncio.to_thread(
-                                merge_once, hc_home, t,
-                            )
-                            for mr in results:
-                                if mr.success:
-                                    logger.info("Merged %s in %s: %s", mr.task_id, t, mr.message)
-                                    # Clear infra_ready for done tasks
-                                    infra_ready.discard((t, mr.task_id))
-                                    # Notify manager of task completion
-                                    _notify_manager(
-                                        t,
-                                        f"Task {format_task_id(mr.task_id)} has been merged successfully. Check status of tasks and agents -- make any necessary assignment decisions.",
-                                    )
-                                else:
-                                    logger.warning("Merge failed %s in %s: %s", mr.task_id, t, mr.message)
-                                    _notify_manager(
-                                        t,
-                                        f"Task {format_task_id(mr.task_id)} merge failed: {mr.message}",
-                                    )
-
-                            # Workflow auto-stage processing
-                            await asyncio.to_thread(_process_auto_stages, hc_home, t)
-
-                    merge_task = asyncio.create_task(_run_auto_stages(team))
-                    _active_merge_tasks.add(merge_task)
-                    merge_task.add_done_callback(_active_merge_tasks.discard)
+            # Process all teams concurrently — each team's infra setup,
+            # agent dispatch, and auto-stages run in parallel.
+            await asyncio.gather(
+                *[_process_team(t) for t in teams],
+                return_exceptions=True,
+            )
 
             # --- Stall detector: nudge agents with assigned tasks but no activity ---
             now = _time.monotonic()
             if now - last_stall_check > 60:
                 last_stall_check = now
-                # Clear recently-nudged set every 5 minutes to allow re-nudging
                 if now - last_nudge_clear > 300:
                     recently_nudged.clear()
                     last_nudge_clear = now
                 for team in teams:
                     try:
-                        all_tasks = _list_tasks_fn(hc_home, team)
+                        all_tasks = await _run_in_db_pool(_list_tasks_fn, hc_home, team)
                         active_assigned = [
                             t for t in all_tasks
                             if t.get("assignee")
@@ -976,13 +1002,13 @@ async def _daemon_loop(
                         ]
                         if not active_assigned:
                             continue
-                        unread_agents = set(agents_with_unread(hc_home, team))
-                        ai_agents = set(list_ai_agents(hc_home, team))
+                        unread_agents = set(await _run_in_db_pool(agents_with_unread, hc_home, team))
+                        ai_agent_set = set(await _run_in_db_pool(list_ai_agents, hc_home, team))
                         for t in active_assigned:
                             assignee = t["assignee"]
                             tid = t["id"]
                             key = (team, assignee, tid)
-                            if assignee not in ai_agents:
+                            if assignee not in ai_agent_set:
                                 continue
                             if assignee in unread_agents:
                                 continue
@@ -993,11 +1019,14 @@ async def _daemon_loop(
                                 continue
                             title = t.get("title", f"T{tid:04d}")
                             status = t.get("status", "unknown")
-                            send_message(
-                                hc_home, team, SYSTEM_USER, assignee,
+                            nudge_body = (
                                 f"You are assigned to T{tid:04d} ({title}) which is {status}. "
-                                f"Please check the task and continue working on it, or report any blockers.",
-                                task_id=tid,
+                                f"Please check the task and continue working on it, or report any blockers."
+                            )
+                            await _run_in_db_pool(
+                                send_message,
+                                hc_home, team, SYSTEM_USER, assignee,
+                                nudge_body, task_id=tid,
                             )
                             recently_nudged.add(key)
                             logger.info("Stall detector nudged %s for T%04d in %s", assignee, tid, team)
@@ -1050,6 +1079,76 @@ def _start_esbuild_watch(frontend_dir: Path) -> subprocess.Popen | None:
     return proc
 
 
+async def _reap_orphaned_subprocesses(
+    exchange: "TelephoneExchange",
+    interval: float = 120.0,
+) -> None:
+    """Periodically kill child Claude processes not tracked by the exchange.
+
+    Safety net for the subprocess leak described in
+    ``docs/bug-daemon-subprocess-leak.md``.  Every *interval* seconds,
+    enumerates child processes of this daemon, identifies those that look
+    like Claude SDK subprocesses (``claude`` in the binary name), and
+    kills any whose PID is not held by a tracked Telephone.
+    """
+    import signal as _signal
+
+    await asyncio.sleep(60)  # let the first batch of telephones spin up
+
+    while True:
+        try:
+            # Collect PIDs the exchange knows about.
+            tracked_pids: set[int] = set()
+            for tel in exchange._telephones.values():
+                for client in (tel._client, tel._stale_client):
+                    if client is None:
+                        continue
+                    transport = getattr(client, "_transport", None) or getattr(
+                        getattr(client, "_query", None), "transport", None
+                    )
+                    proc = getattr(transport, "_process", None) if transport else None
+                    pid = getattr(proc, "pid", None)
+                    if pid:
+                        tracked_pids.add(pid)
+
+            # Enumerate child processes of this daemon.
+            my_pid = os.getpid()
+            reaped = 0
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                try:
+                    stat_path = f"/proc/{entry}/stat"
+                    with open(stat_path) as f:
+                        parts = f.read().split()
+                    ppid = int(parts[3])
+                    if ppid != my_pid:
+                        continue
+                    comm = parts[1].strip("()")
+                    if "claude" not in comm:
+                        continue
+                    child_pid = int(entry)
+                    if child_pid in tracked_pids:
+                        continue
+                    # Orphan found — kill it.
+                    logger.warning(
+                        "Reaper: killing orphaned Claude subprocess PID %d",
+                        child_pid,
+                    )
+                    os.kill(child_pid, _signal.SIGTERM)
+                    reaped += 1
+                except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
+                    continue
+            if reaped:
+                logger.info("Reaper: killed %d orphaned subprocess(es)", reaped)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("Reaper error", exc_info=True)
+
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Start/stop the daemon loop and frontend watcher with the server.
@@ -1069,6 +1168,7 @@ async def _lifespan(app: FastAPI):
     _shutdown_flag = False
 
     task = None
+    reaper_task = None
     esbuild_proc: subprocess.Popen | None = None
     exchange: TelephoneExchange | None = None
     daemon_lock_fd: int | None = None
@@ -1100,6 +1200,12 @@ async def _lifespan(app: FastAPI):
 
         task = asyncio.create_task(
             _daemon_loop(hc_home, interval, max_concurrent, token_budget, exchange=exchange)
+        )
+
+        # Safety-net: periodically reap orphaned Claude subprocesses that
+        # survived disconnect (see docs/bug-daemon-subprocess-leak.md).
+        reaper_task = asyncio.create_task(
+            _reap_orphaned_subprocesses(exchange)
         )
 
     # Always do a one-shot frontend build if frontend/ exists and node is available
@@ -1152,6 +1258,12 @@ async def _lifespan(app: FastAPI):
                 esbuild_proc.kill()
             except OSError:
                 pass
+
+    # Cancel the reaper task
+    if enable and reaper_task is not None:
+        reaper_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper_task
 
     if task is not None:
         # Set shutdown flag before cancelling the daemon loop

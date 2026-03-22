@@ -29,10 +29,12 @@ lifetime is independent of DB sessions.
 
 import asyncio
 import difflib
+import functools
 import logging
 import os
 import random
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +67,18 @@ from delegate.activity import broadcast as broadcast_activity, broadcast_thinkin
 from delegate.paths import team_dir
 
 logger = logging.getLogger(__name__)
+
+# Dedicated thread pool for blocking DB/IO operations inside run_turn().
+# Prevents synchronous SQLite calls from blocking the asyncio event loop
+# that handles HTTP traffic, SSE streams, and agent subprocess I/O.
+_db_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="runtime-db")
+
+
+async def _to_db(fn, *args, **kwargs):
+    """Run *fn* in the runtime DB thread pool, keeping the event loop free."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_db_pool, functools.partial(fn, *args, **kwargs))
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -818,9 +832,12 @@ async def run_turn(
     # claim_inbox_batch fetches candidates and marks only the selected batch
     # as seen inside a single BEGIN IMMEDIATE transaction.  Messages not
     # selected remain untouched and eligible for the next dispatch cycle.
+    # Runs in a thread pool so the BEGIN IMMEDIATE lock doesn't block the
+    # event loop (previously a major bottleneck with many concurrent agents).
     from delegate.config import get_default_human
     human_name = get_default_human(hc_home)
-    batch = claim_inbox_batch(
+    batch = await _to_db(
+        claim_inbox_batch,
         hc_home, team, agent, limit=50,
         select_fn=lambda msgs: _select_batch(msgs, human_name=human_name),
     )
@@ -835,7 +852,7 @@ async def run_turn(
     if current_task_id is not None:
         try:
             from delegate.task import get_task as _get_task
-            current_task = _get_task(hc_home, team, current_task_id)
+            current_task = await _to_db(_get_task, hc_home, team, current_task_id)
         except Exception:
             logger.debug("Could not resolve task %s", current_task_id)
 
@@ -850,7 +867,7 @@ async def run_turn(
         msg_ids = [m.id for m in batch if m.id is not None]
         if msg_ids:
             ts_now = datetime.now(timezone.utc).isoformat()
-            mark_processed_batch(hc_home, team, msg_ids)
+            await _to_db(mark_processed_batch, hc_home, team, msg_ids)
             broadcast_msg_status(team, msg_ids, "seen_at", ts_now)
             broadcast_msg_status(team, msg_ids, "processed_at", ts_now)
         log_caller.reset(_prev_caller)
@@ -876,7 +893,7 @@ async def run_turn(
     broadcast_turn_event('turn_started', agent, team=team, task_id=current_task_id, sender=primary_sender)
 
     # --- Start DB session (1:1 with run_turn) ---
-    session_id = start_session(hc_home, team, agent, task_id=current_task_id)
+    session_id = await _to_db(start_session, hc_home, team, agent, task_id=current_task_id)
     result.session_id = session_id
 
     alog.session_start_log(
@@ -1016,14 +1033,14 @@ async def run_turn(
             result.error = "interrupted"
             result.turns = 1
             error_occurred = True
-            _mark_batch_processed(hc_home, team, batch)
+            await _to_db(_mark_batch_processed, hc_home, team, batch)
             raise
         except Exception as exc:
             alog.session_error(exc)
             result.error = str(exc)
             result.turns = 1
             error_occurred = True
-            _mark_batch_processed(hc_home, team, batch)
+            await _to_db(_mark_batch_processed, hc_home, team, batch)
             # Invalidate the Telephone so the next turn gets a fresh
             # subprocess — a fatal SDK error (e.g. JSON buffer overflow)
             # leaves the cached Telephone in a broken state.
@@ -1032,12 +1049,18 @@ async def run_turn(
                     "Removing broken telephone for %s/%s after fatal error: %s",
                     team, agent, exc,
                 )
-                exchange.remove(team, agent)
+                removed_tel = exchange.remove(team, agent)
+                if removed_tel is not None:
+                    try:
+                        await removed_tel.close()
+                    except Exception:
+                        logger.debug("Failed to close removed telephone for %s/%s", team, agent, exc_info=True)
             except Exception:
                 logger.exception("Failed to remove telephone for %s/%s", team, agent)
     finally:
         try:
-            end_session(
+            await _to_db(
+                end_session,
                 hc_home, team, session_id,
                 tokens_in=turn.input_tokens, tokens_out=turn.output_tokens,
                 cost_usd=turn.cost_usd,
@@ -1121,7 +1144,8 @@ async def run_turn(
         tool_calls=turn_tools or None,
     )
 
-    update_session_tokens(
+    await _to_db(
+        update_session_tokens,
         hc_home, team, session_id,
         tokens_in=turn.input_tokens,
         tokens_out=turn.output_tokens,
@@ -1130,16 +1154,18 @@ async def run_turn(
         cache_write_tokens=turn.cache_write_tokens,
     )
 
-    _mark_batch_processed(hc_home, team, batch)
+    await _to_db(_mark_batch_processed, hc_home, team, batch)
 
     # Re-check task association
     if current_task_id is None:
         try:
             from delegate.task import list_tasks as _list_tasks
-            open_tasks = _list_tasks(hc_home, team, assignee=agent, status="in_progress")
+            open_tasks = await _to_db(
+                _list_tasks, hc_home, team, assignee=agent, status="in_progress",
+            )
             if open_tasks:
                 current_task_id = open_tasks[0]["id"]
-                update_session_task(hc_home, team, session_id, current_task_id)
+                await _to_db(update_session_task, hc_home, team, session_id, current_task_id)
                 alog.info(
                     "Task association updated | task=%s",
                     format_task_id(current_task_id),
@@ -1209,7 +1235,8 @@ async def run_turn(
         result.turns = turn_num
 
         try:
-            update_session_tokens(
+            await _to_db(
+                update_session_tokens,
                 hc_home, team, session_id,
                 tokens_in=total.input_tokens,
                 tokens_out=total.output_tokens,
@@ -1248,7 +1275,8 @@ async def run_turn(
         and not error_occurred
     ):
         try:
-            _auto_continue_researcher(
+            await _to_db(
+                _auto_continue_researcher,
                 hc_home, team, agent, current_task_id, alog,
             )
         except Exception:
