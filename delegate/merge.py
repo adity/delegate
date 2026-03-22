@@ -61,7 +61,7 @@ import time
 import uuid
 from pathlib import Path
 
-from delegate.config import get_merge_policy
+from delegate.config import get_merge_policy, get_reviewer_config
 from delegate.notify import notify_conflict
 from delegate.review import get_current_review
 from delegate.task import (
@@ -1253,6 +1253,9 @@ def merge_once(
 
     # --- 1. Newly approved tasks ---
     # Collect all ready candidates first, then sort for optimal ordering.
+    reviewer_cfg = get_reviewer_config(hc_home, team)
+    auto_merge_enabled = reviewer_cfg.get("auto_merge", False)
+
     ready_tasks: list[dict] = []
     for task in list_tasks(hc_home, team, status="in_approval"):
         task_id = task["id"]
@@ -1265,11 +1268,21 @@ def merge_once(
 
         ready = False
         if merge_policy == "no-review":
+            # no-review repos always auto-merge regardless of toggle
             ready = True
         elif merge_policy == "review-needed":
             review = get_current_review(hc_home, team, task_id)
             if review and review.get("verdict") == "approved":
-                ready = True
+                # Approved — but only proceed to merge if auto_merge is on.
+                # When auto_merge is off, the task stays in_approval for
+                # a human to manually trigger the merge from the UI.
+                if auto_merge_enabled:
+                    ready = True
+                else:
+                    logger.debug(
+                        "%s: approved but auto_merge is off — waiting for manual merge",
+                        task_id,
+                    )
             else:
                 logger.debug(
                     "%s: needs review (verdict=%s)",

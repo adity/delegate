@@ -1522,7 +1522,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
     @app.post("/teams/{team}/reviewer")
     def post_reviewer(team: str, body: dict):
-        """Update reviewer config (mode, threshold, model)."""
+        """Update reviewer config (mode, threshold, model, auto_merge)."""
         from delegate.config import update_reviewer_config
         kwargs = {}
         if "mode" in body:
@@ -1531,6 +1531,8 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             kwargs["threshold"] = float(body["threshold"])
         if "model" in body:
             kwargs["model"] = str(body["model"])
+        if "auto_merge" in body:
+            kwargs["auto_merge"] = bool(body["auto_merge"])
         return update_reviewer_config(hc_home, team, **kwargs)
 
     # --- Auto-approver endpoints (deprecated — kept for backwards compat) ---

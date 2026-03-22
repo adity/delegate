@@ -335,12 +335,16 @@ def create_task_worktree(
     wt_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fetch latest before creating worktree (best effort)
-    subprocess.run(
-        ["git", "fetch", "--all"],
-        cwd=str(real_repo),
-        capture_output=True,
-        check=False,  # Don't fail if fetch fails (offline, no remote)
-    )
+    try:
+        subprocess.run(
+            ["git", "fetch", "--all"],
+            cwd=str(real_repo),
+            capture_output=True,
+            check=False,  # Don't fail if fetch fails (offline, no remote)
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("git fetch --all timed out after 15s for %s — skipping", real_repo)
 
     # Record base SHA (current main HEAD) on the task (per-repo dict)
     try:
@@ -355,12 +359,16 @@ def create_task_worktree(
         logger.warning("Could not record base_sha for %s: %s", task_id, exc)
 
     # Defensive prune to clean up any stale worktree metadata before creating
-    subprocess.run(
-        ["git", "worktree", "prune"],
-        cwd=str(real_repo),
-        capture_output=True,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=str(real_repo),
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("git worktree prune timed out after 10s for %s — skipping", real_repo)
 
     # Create worktree with a new branch off the default branch (main or master)
     default_branch = get_default_branch(real_repo)

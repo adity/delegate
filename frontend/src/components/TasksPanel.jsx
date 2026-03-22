@@ -33,6 +33,7 @@ export function TasksPanel() {
   const [mergeSort, setMergeSort] = useState(false);
   const [mergeOrder, setMergeOrder] = useState(null);
   const [reviewerAI, setReviewerAI] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(false);
   const [taskFreezeOn, setTaskFreezeOn] = useState(false);
   const [maxTasksEnabled, setMaxTasksEnabled] = useState(false);
   const [maxTasksLimit, setMaxTasksLimit] = useState(10);
@@ -113,10 +114,14 @@ export function TasksPanel() {
     return () => { cancelled = true; };
   }, [mergeSort, team, allTasks]);
 
-  // Fetch reviewer state on mount / team change
+  // Fetch reviewer state (includes auto_merge) on mount / team change
   useEffect(() => {
     let cancelled = false;
-    fetchReviewer(team).then(data => { if (!cancelled) setReviewerAI(data?.mode === "ai"); });
+    fetchReviewer(team).then(data => {
+      if (cancelled) return;
+      setReviewerAI(data?.mode === "ai");
+      setAutoMerge(!!data?.auto_merge);
+    });
     return () => { cancelled = true; };
   }, [team]);
 
@@ -142,8 +147,18 @@ export function TasksPanel() {
   const toggleReviewer = useCallback(() => {
     const next = !reviewerAI;
     setReviewerAI(next);
+    // AI Review ON → auto-merge is forced ON
+    if (next) setAutoMerge(true);
     setReviewer(team, { mode: next ? "ai" : "human" });
   }, [reviewerAI, team]);
+
+  const toggleAutoMerge = useCallback(() => {
+    // Cannot turn off auto-merge while AI Review is on
+    if (reviewerAI) return;
+    const next = !autoMerge;
+    setAutoMerge(next);
+    setReviewer(team, { auto_merge: next });
+  }, [autoMerge, reviewerAI, team]);
 
   const toggleTaskFreeze = useCallback(() => {
     const next = !taskFreezeOn;
@@ -399,6 +414,17 @@ export function TasksPanel() {
             <path d="M5 7l1.5 1.5L9 5.5" />
           </svg>
           AI Review
+        </button>
+        <button
+          class={`merge-sort-toggle${autoMerge ? " active" : ""}${reviewerAI ? " locked" : ""}`}
+          onClick={toggleAutoMerge}
+          title={reviewerAI ? "Auto Merge is locked ON while AI Review is enabled" : autoMerge ? "Auto Merge is ON — approved tasks merge automatically" : "Enable auto merge for approved tasks"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
+               strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 2v10M4 9l3 3 3-3" />
+          </svg>
+          Auto Merge
         </button>
         <button
           class={`merge-sort-toggle${taskFreezeOn ? " active" : ""}`}

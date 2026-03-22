@@ -396,32 +396,41 @@ _REVIEWER_DEFAULTS = {
     "mode": "human",
     "threshold": 3.5,
     "model": "claude-sonnet-4-20250514",
+    "auto_merge": True,
 }
 
 
 def get_reviewer_config(hc_home: Path, team: str) -> dict:
     """Return the reviewer config for a team.
 
-    Returns dict with keys: mode ('human'|'ai'), threshold (float), model (str).
-    Missing keys are filled from defaults.
+    Returns dict with keys: mode ('human'|'ai'), threshold (float),
+    model (str), auto_merge (bool).
+
+    Missing keys are filled from defaults.  When mode is ``"ai"``,
+    ``auto_merge`` is always forced to ``True`` (AI review implies
+    auto-merge).
 
     Falls back to legacy ``auto_approver`` key if ``reviewer`` is not set.
     """
     data = _read_repos(hc_home, team)
     if "reviewer" in data:
         stored = data["reviewer"]
-        return {**_REVIEWER_DEFAULTS, **stored}
-    # Legacy fallback
-    legacy = data.get("auto_approver", {})
-    if legacy:
+        cfg = {**_REVIEWER_DEFAULTS, **stored}
+    elif "auto_approver" in data:
+        # Legacy fallback
+        legacy = data["auto_approver"]
         cfg = {**_REVIEWER_DEFAULTS}
         cfg["mode"] = "ai" if legacy.get("enabled") else "human"
         if "threshold" in legacy:
             cfg["threshold"] = legacy["threshold"]
         if "model" in legacy:
             cfg["model"] = legacy["model"]
-        return cfg
-    return dict(_REVIEWER_DEFAULTS)
+    else:
+        cfg = dict(_REVIEWER_DEFAULTS)
+    # AI review mode implies auto-merge is on.
+    if cfg["mode"] == "ai":
+        cfg["auto_merge"] = True
+    return cfg
 
 
 def is_reviewer_ai(hc_home: Path, team: str) -> bool:
@@ -435,17 +444,21 @@ def set_reviewer_mode(hc_home: Path, team: str, mode: str) -> None:
 
 
 def update_reviewer_config(hc_home: Path, team: str, **kwargs) -> dict:
-    """Update reviewer config keys (mode, threshold, model).
+    """Update reviewer config keys (mode, threshold, model, auto_merge).
 
+    When *mode* is set to ``"ai"``, *auto_merge* is forced to ``True``.
     Removes legacy ``auto_approver`` key on write.
     Returns the updated config dict.
     """
     data = _read_repos(hc_home, team)
     # Start from current config (which handles legacy fallback)
     current = dict(get_reviewer_config(hc_home, team))
-    for key in ("mode", "threshold", "model"):
+    for key in ("mode", "threshold", "model", "auto_merge"):
         if key in kwargs:
             current[key] = kwargs[key]
+    # AI review implies auto-merge.
+    if current.get("mode") == "ai":
+        current["auto_merge"] = True
     data["reviewer"] = current
     data.pop("auto_approver", None)  # remove legacy key on write
     _write_repos(hc_home, team, data)
