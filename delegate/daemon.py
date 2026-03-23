@@ -217,11 +217,48 @@ def start_daemon(
     return proc.pid
 
 
+def _sweep_orphaned_claude_processes() -> int:
+    """Kill Claude processes reparented to PID 1 (orphans from a dead daemon).
+
+    When a daemon dies, its Claude child processes get reparented to init
+    (PID 1).  This sweep finds and kills them so they don't linger
+    indefinitely consuming memory.
+
+    Returns the number of processes killed.
+    """
+    reaped = 0
+    my_pid = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            child_pid = int(entry)
+            if child_pid == my_pid:
+                continue
+            with open(f"/proc/{entry}/stat") as f:
+                parts = f.read().split()
+            ppid = int(parts[3])
+            comm = parts[1].strip("()")
+            if ppid == 1 and "claude" in comm:
+                logger.info("Killing reparented Claude orphan PID %d", child_pid)
+                os.kill(child_pid, signal.SIGTERM)
+                reaped += 1
+        except (FileNotFoundError, ProcessLookupError, ValueError,
+                IndexError, PermissionError):
+            continue
+    if reaped:
+        logger.info("Swept %d orphaned Claude process(es)", reaped)
+    return reaped
+
+
 def stop_daemon(hc_home: Path, timeout: float = 15.0) -> bool:
     """Stop the running daemon.
 
     Sends SIGTERM and waits up to *timeout* seconds for the process to exit.
     If still alive after timeout, sends SIGKILL.
+
+    After the daemon exits, sweeps for orphaned Claude subprocesses that
+    got reparented to PID 1 during shutdown.
 
     Returns True if a daemon was stopped, False if none was running.
     """
@@ -253,6 +290,7 @@ def stop_daemon(hc_home: Path, timeout: float = 15.0) -> bool:
             logger.info("Daemon stopped (%.1fs)", elapsed)
             pid_path = daemon_pid_path(hc_home)
             pid_path.unlink(missing_ok=True)
+            _sweep_orphaned_claude_processes()
             return True
 
     # Timeout expired — force kill
@@ -272,10 +310,12 @@ def stop_daemon(hc_home: Path, timeout: float = 15.0) -> bool:
             logger.info("Daemon force-killed")
             pid_path = daemon_pid_path(hc_home)
             pid_path.unlink(missing_ok=True)
+            _sweep_orphaned_claude_processes()
             return True
 
     # Still alive after SIGKILL (very unlikely)
     logger.error("Daemon PID %d did not respond to SIGKILL", pid)
     pid_path = daemon_pid_path(hc_home)
     pid_path.unlink(missing_ok=True)
+    _sweep_orphaned_claude_processes()
     return True

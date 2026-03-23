@@ -1188,6 +1188,12 @@ async def _lifespan(app: FastAPI):
         budget_str = os.environ.get("DELEGATE_TOKEN_BUDGET")
         token_budget = int(budget_str) if budget_str else None
 
+        # Kill orphaned Claude processes from any previous daemon before
+        # spawning new ones.  After restart, old orphans are reparented to
+        # PID 1 and invisible to the periodic reaper.
+        from delegate.daemon import _sweep_orphaned_claude_processes
+        _sweep_orphaned_claude_processes()
+
         exchange = TelephoneExchange()
         global _exchange
         _exchange = exchange
