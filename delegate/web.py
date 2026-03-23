@@ -1092,6 +1092,7 @@ async def _reap_orphaned_subprocesses(
     kills any whose PID is not held by a tracked Telephone.
     """
     import signal as _signal
+    from delegate.daemon import find_claude_pids
 
     await asyncio.sleep(60)  # let the first batch of telephones spin up
 
@@ -1111,36 +1112,18 @@ async def _reap_orphaned_subprocesses(
                     if pid:
                         tracked_pids.add(pid)
 
-            # Enumerate child processes of this daemon.
-            my_pid = os.getpid()
-            reaped = 0
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
+            orphan_pids = find_claude_pids(
+                ppid_filter=os.getpid(),
+                exclude_pids=tracked_pids,
+            )
+            for pid in orphan_pids:
                 try:
-                    stat_path = f"/proc/{entry}/stat"
-                    with open(stat_path) as f:
-                        parts = f.read().split()
-                    ppid = int(parts[3])
-                    if ppid != my_pid:
-                        continue
-                    comm = parts[1].strip("()")
-                    if "claude" not in comm:
-                        continue
-                    child_pid = int(entry)
-                    if child_pid in tracked_pids:
-                        continue
-                    # Orphan found — kill it.
-                    logger.warning(
-                        "Reaper: killing orphaned Claude subprocess PID %d",
-                        child_pid,
-                    )
-                    os.kill(child_pid, _signal.SIGTERM)
-                    reaped += 1
-                except (FileNotFoundError, ProcessLookupError, ValueError, IndexError):
-                    continue
-            if reaped:
-                logger.info("Reaper: killed %d orphaned subprocess(es)", reaped)
+                    logger.warning("Reaper: killing orphaned Claude subprocess PID %d", pid)
+                    os.kill(pid, _signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if orphan_pids:
+                logger.info("Reaper: killed %d orphaned subprocess(es)", len(orphan_pids))
         except asyncio.CancelledError:
             return
         except Exception:
@@ -4245,8 +4228,8 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         context = context_file.read_text() if context_file.exists() else ""
 
         # Read preamble from prompt.py
-        from delegate.prompt import build_preamble
-        preamble = build_preamble(hc_home, team, agent)
+        from delegate.prompt import Prompt
+        preamble = Prompt(hc_home, team, agent).build_preamble()
 
         return {
             "role": state.get("role", "engineer"),

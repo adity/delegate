@@ -39,7 +39,7 @@ from delegate.paths import (
 )
 from delegate.mailbox import read_inbox
 from delegate.task import format_task_id
-from delegate.agent import DEFAULT_MODEL, DEFAULT_MANAGER_MODEL, ALLOWED_MODELS
+from delegate.agent import DEFAULT_MODEL, DEFAULT_MANAGER_MODEL, ALLOWED_MODELS, SENIORITY_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -100,18 +100,9 @@ def collect_instruction_files(repo_path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Constants (mirrored from agent.py for identical output)
+# Constants (imported from agent.py — single source of truth)
 # ---------------------------------------------------------------------------
-
-# Legacy seniority -> model mapping for backward compatibility
-_SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
-
-# Context window: how many recent processed messages to include per turn
-HISTORY_WITH_PEER = 8       # messages with the primary sender (both directions)
-HISTORY_WITH_OTHERS = 4     # messages with anyone else
-
-# Maximum messages to batch per turn (all must share the same task_id).
-MAX_BATCH_SIZE = 5
+from delegate.agent import HISTORY_WITH_PEER, HISTORY_WITH_OTHERS, MAX_BATCH_SIZE  # noqa: E402
 
 
 class Prompt:
@@ -134,7 +125,7 @@ class Prompt:
         # Resolve model: prefer direct 'model' field, fall back from legacy 'seniority'
         self._model = (
             self._state.get("model")
-            or _SENIORITY_MAP.get(self._state.get("seniority", ""), None)
+            or SENIORITY_MAP.get(self._state.get("seniority", ""), None)
             or (DEFAULT_MANAGER_MODEL if self._role == "manager" else DEFAULT_MODEL)
         )
 
@@ -183,10 +174,10 @@ class Prompt:
             mt_cfg = get_max_tasks_config(hc_home, team)
             if mt_cfg["enabled"]:
                 from delegate.task import list_tasks
-                from delegate.config import _IN_PROGRESS_STATUSES, _QUEUED_STATUSES
+                from delegate.task import IN_PROGRESS_STATUSES, QUEUED_STATUSES
                 all_tasks = list_tasks(hc_home, team)
-                in_prog = len([t for t in all_tasks if t.get("status") in _IN_PROGRESS_STATUSES])
-                queued = len([t for t in all_tasks if t.get("status") in _QUEUED_STATUSES])
+                in_prog = len([t for t in all_tasks if t.get("status") in IN_PROGRESS_STATUSES])
+                queued = len([t for t in all_tasks if t.get("status") in QUEUED_STATUSES])
                 lip = mt_cfg["limit_in_progress"]
                 lq = mt_cfg["limit_queued"]
                 parts = []
@@ -439,8 +430,10 @@ Team data: {hc_home}/teams/{team}/"""
     def _section_context_md(self) -> str:
         """Previous session context from context.md."""
         context = self._ad / "context.md"
-        if context.exists() and context.read_text().strip():
-            return f"=== PREVIOUS SESSION CONTEXT ===\n{context.read_text().strip()}"
+        if context.exists():
+            text = context.read_text().strip()
+            if text:
+                return f"=== PREVIOUS SESSION CONTEXT ===\n{text}"
         return ""
 
     def _section_task_context(
@@ -615,7 +608,9 @@ Team data: {hc_home}/teams/{team}/"""
         ]
 
         context = self._ad / "context.md"
-        if context.exists() and context.read_text().strip():
-            parts.insert(0, f"=== PREVIOUS SESSION CONTEXT ===\n{context.read_text().strip()}\n")
+        if context.exists():
+            text = context.read_text().strip()
+            if text:
+                parts.insert(0, f"=== PREVIOUS SESSION CONTEXT ===\n{text}\n")
 
         return "\n".join(parts)

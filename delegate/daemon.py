@@ -217,38 +217,59 @@ def start_daemon(
     return proc.pid
 
 
-def _sweep_orphaned_claude_processes() -> int:
-    """Kill Claude processes reparented to PID 1 (orphans from a dead daemon).
+def find_claude_pids(
+    *,
+    ppid_filter: int | None = None,
+    exclude_pids: set[int] | None = None,
+) -> list[int]:
+    """Scan ``/proc`` for Claude processes matching the given criteria.
 
-    When a daemon dies, its Claude child processes get reparented to init
-    (PID 1).  This sweep finds and kills them so they don't linger
-    indefinitely consuming memory.
+    Args:
+        ppid_filter: If set, only return processes whose parent PID matches.
+        exclude_pids: PIDs to skip (e.g. tracked Telephone subprocesses).
 
-    Returns the number of processes killed.
+    Returns a list of matching PIDs.
     """
-    reaped = 0
+    exclude = exclude_pids or set()
     my_pid = os.getpid()
+    found: list[int] = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         try:
             child_pid = int(entry)
-            if child_pid == my_pid:
+            if child_pid == my_pid or child_pid in exclude:
                 continue
             with open(f"/proc/{entry}/stat") as f:
                 parts = f.read().split()
             ppid = int(parts[3])
             comm = parts[1].strip("()")
-            if ppid == 1 and "claude" in comm:
-                logger.info("Killing reparented Claude orphan PID %d", child_pid)
-                os.kill(child_pid, signal.SIGTERM)
-                reaped += 1
+            if "claude" not in comm:
+                continue
+            if ppid_filter is not None and ppid != ppid_filter:
+                continue
+            found.append(child_pid)
         except (FileNotFoundError, ProcessLookupError, ValueError,
                 IndexError, PermissionError):
             continue
-    if reaped:
-        logger.info("Swept %d orphaned Claude process(es)", reaped)
-    return reaped
+    return found
+
+
+def _sweep_orphaned_claude_processes() -> int:
+    """Kill Claude processes reparented to PID 1 (orphans from a dead daemon).
+
+    Returns the number of processes killed.
+    """
+    pids = find_claude_pids(ppid_filter=1)
+    for pid in pids:
+        try:
+            logger.info("Killing reparented Claude orphan PID %d", pid)
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if pids:
+        logger.info("Swept %d orphaned Claude process(es)", len(pids))
+    return len(pids)
 
 
 def stop_daemon(hc_home: Path, timeout: float = 15.0) -> bool:

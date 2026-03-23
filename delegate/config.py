@@ -543,15 +543,6 @@ def update_task_freeze_config(hc_home: Path, team: str, **kwargs) -> dict:
 
 _MAX_TASKS_DEFAULTS = {"enabled": False, "limit_in_progress": 5, "limit_queued": 10}
 
-# Statuses considered "in progress" (actively being worked).
-_IN_PROGRESS_STATUSES = frozenset({
-    "in_progress", "in_review", "in_approval", "merging",
-    "researching", "reporting", "rejected", "merge_failed",
-})
-
-# Statuses considered "queued" (waiting to start).
-_QUEUED_STATUSES = frozenset({"todo", "paused"})
-
 
 def get_max_tasks_config(hc_home: Path, team: str) -> dict:
     """Return the max-tasks config for a team.

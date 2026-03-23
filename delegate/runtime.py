@@ -819,10 +819,10 @@ async def run_turn(
     # Set logging caller context for all log lines during this turn
     _prev_caller = log_caller.set(f"{agent}:{role}")
     # Resolve model: prefer direct 'model' field, fall back from legacy 'seniority'
-    _SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
+    from delegate.agent import SENIORITY_MAP
     model = (
         state.get("model")
-        or _SENIORITY_MAP.get(state.get("seniority", ""), None)
+        or SENIORITY_MAP.get(state.get("seniority", ""), None)
         or (DEFAULT_MANAGER_MODEL if role == "manager" else DEFAULT_MODEL)
     )
     token_budget = state.get("token_budget")

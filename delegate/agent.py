@@ -29,14 +29,13 @@ logger = logging.getLogger(__name__)
 # Default idle timeout in seconds (10 minutes)
 DEFAULT_IDLE_TIMEOUT = 600
 
-# Context window: how many recent processed messages to include per turn
-CONTEXT_MSGS_SAME_SENDER = 5   # from the primary sender of the new message
-CONTEXT_MSGS_OTHERS = 3         # most recent from anyone else
-
 # Allowed model values and defaults
 ALLOWED_MODELS = ("opus", "sonnet")
 DEFAULT_MODEL = "sonnet"
 DEFAULT_MANAGER_MODEL = "sonnet"
+
+# Legacy seniority -> model mapping for backward compatibility
+SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
 
 
 # ---------------------------------------------------------------------------
@@ -296,17 +295,6 @@ def _branch_name(hc_home: Path, team: str, task_id: int, title: str = "") -> str
     return f"delegate/{tid}/{team}/{format_task_id(task_id)}"
 
 
-def push_task_branch(hc_home: Path, team: str, task: dict) -> bool:
-    """Push the task's branch to origin in all repos.
-
-    Returns True if at least one push succeeded, False otherwise.
-    """
-    # NOTE: Removed push_branch() call. Delegate works with local branches only.
-    # Worktrees share the same .git directory, so all branches are visible locally.
-    # The merge worker (merge.py) works with local branches directly.
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Prompt builders
 # ---------------------------------------------------------------------------
@@ -342,8 +330,7 @@ def build_system_prompt(
     state = yaml.safe_load((ad / "state.yaml").read_text()) or {}
     role = state.get("role", "engineer")
     # Resolve model: prefer "model" field, fall back from legacy "seniority"
-    _SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
-    model_name = state.get("model") or _SENIORITY_MAP.get(state.get("seniority", ""), None) or (DEFAULT_MANAGER_MODEL if role == "manager" else DEFAULT_MODEL)
+    model_name = state.get("model") or SENIORITY_MAP.get(state.get("seniority", ""), None) or (DEFAULT_MANAGER_MODEL if role == "manager" else DEFAULT_MODEL)
     human_name = get_default_human(hc_home) or "human"
     manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"
 
@@ -437,10 +424,10 @@ def build_system_prompt(
         mt_cfg = get_max_tasks_config(hc_home, team)
         if mt_cfg["enabled"]:
             from delegate.task import list_tasks
-            from delegate.config import _IN_PROGRESS_STATUSES, _QUEUED_STATUSES
+            from delegate.task import IN_PROGRESS_STATUSES, QUEUED_STATUSES
             all_tasks = list_tasks(hc_home, team)
-            in_prog = len([t for t in all_tasks if t.get("status") in _IN_PROGRESS_STATUSES])
-            queued = len([t for t in all_tasks if t.get("status") in _QUEUED_STATUSES])
+            in_prog = len([t for t in all_tasks if t.get("status") in IN_PROGRESS_STATUSES])
+            queued = len([t for t in all_tasks if t.get("status") in QUEUED_STATUSES])
             lip = mt_cfg["limit_in_progress"]
             lq = mt_cfg["limit_queued"]
             parts = []
