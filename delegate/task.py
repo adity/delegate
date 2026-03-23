@@ -155,6 +155,14 @@ def create_task(
     if not assignee or not assignee.strip():
         raise ValueError("Assignee/DRI is required when creating a task")
 
+    # Hard enforcement of task-creation freeze.
+    from delegate.config import is_task_creation_frozen
+    if is_task_creation_frozen(hc_home, team):
+        raise ValueError(
+            "Task creation is frozen for this team. "
+            "Disable the task freeze before creating new tasks."
+        )
+
     if priority not in VALID_PRIORITIES:
         raise ValueError(f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}")
 
