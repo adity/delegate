@@ -601,8 +601,7 @@ def _ensure_task_infra(
     filesystem checks on every poll cycle.  It is cleared when a task
     transitions to ``done`` or ``cancelled``.
     """
-    from delegate.repo import create_task_worktree
-    from delegate.repo import get_task_worktree_path
+    from delegate.repo import create_task_worktree, get_task_worktree_path, BranchExistsError
     from delegate.task import _all_deps_resolved
     from delegate.env import write_env_scripts
 
@@ -674,6 +673,31 @@ def _ensure_task_infra(
                                 exc_info=True,
                             )
                 infra_ready.add(key)
+            except BranchExistsError as exc:
+                # Branch exists but worktree doesn't — mark task as blocked
+                # so it stops retrying and surfaces to the manager.
+                logger.warning(
+                    "Branch conflict for %s/%s: %s",
+                    team, format_task_id(task_id), exc,
+                )
+                try:
+                    from delegate.task import update_task
+                    update_task(
+                        hc_home, team, task_id,
+                        status_detail=f"Blocked: {exc}",
+                    )
+                    from delegate.chat import log_event
+                    log_event(
+                        hc_home, team,
+                        f"{format_task_id(task_id)} blocked — branch already exists, worktree cannot be created",
+                        task_id=task_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to mark task %s/%s as blocked after branch conflict",
+                        team, format_task_id(task_id),
+                    )
+                infra_ready.add(key)  # stop retrying
             except Exception:
                 logger.exception(
                     "Failed to create worktree infra for %s/%s",
@@ -985,19 +1009,21 @@ async def _daemon_loop(
                 return_exceptions=True,
             )
 
-            # --- Stall detector: nudge agents with assigned tasks but no activity ---
+            # --- Stall detector: nudge worker agents with assigned tasks but no activity ---
             now = _time.monotonic()
-            if now - last_stall_check > 60:
+            if now - last_stall_check > 600:
                 last_stall_check = now
-                if now - last_nudge_clear > 300:
+                if now - last_nudge_clear > 3000:
                     recently_nudged.clear()
                     last_nudge_clear = now
                 for team in teams:
                     try:
+                        manager = await _run_in_db_pool(get_member_by_role, hc_home, team, "manager")
                         all_tasks = await _run_in_db_pool(_list_tasks_fn, hc_home, team)
                         active_assigned = [
                             t for t in all_tasks
                             if t.get("assignee")
+                            and t.get("assignee") != manager
                             and t.get("status") in ("todo", "in_progress")
                         ]
                         if not active_assigned:

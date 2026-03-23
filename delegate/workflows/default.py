@@ -36,10 +36,12 @@ class InProgress(Stage):
     _transitions = {"in_review", "cancelled"}
 
     def assign(self, ctx):
-        # If the task already has an assignee, keep them (e.g. rework
-        # after rejection).  Otherwise, pick the least-loaded engineer.
-        if ctx.task.get("assignee"):
-            return ctx.task.assignee
+        # Keep existing assignee for rework (rejection → in_progress),
+        # but NOT if the assignee is the manager — the manager should
+        # never be the one working on a task.
+        current = ctx.task.get("assignee")
+        if current and current != ctx.manager:
+            return current
         return ctx.pick(role="engineer")
 
     def enter(self, ctx):

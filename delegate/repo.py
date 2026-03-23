@@ -33,6 +33,10 @@ from delegate.config import (
 
 logger = logging.getLogger(__name__)
 
+
+class BranchExistsError(Exception):
+    """Raised when a worktree branch already exists in the repo."""
+
 # Cache: resolved repo path → default branch name ("main" or "master")
 _default_branch_cache: dict[str, str] = {}
 
@@ -370,8 +374,24 @@ def create_task_worktree(
     except subprocess.TimeoutExpired:
         logger.warning("git worktree prune timed out after 10s for %s — skipping", real_repo)
 
-    # Create worktree with a new branch off the default branch (main or master)
+    # Create worktree with a new branch off the default branch (main or master).
+    # If the branch already exists (e.g. agent committed before worktree was
+    # cleaned up), raise BranchExistsError so the caller can mark the task
+    # as blocked instead of retrying forever.
     default_branch = get_default_branch(real_repo)
+    branch_exists = subprocess.run(
+        ["git", "rev-parse", "--verify", branch],
+        cwd=str(real_repo),
+        capture_output=True,
+    ).returncode == 0
+
+    if branch_exists:
+        raise BranchExistsError(
+            f"Branch {branch!r} already exists in {real_repo}. "
+            f"Worktree cannot be created with -b. Resolve manually: "
+            f"git -C {real_repo} worktree add {wt_path} {branch}"
+        )
+
     subprocess.run(
         ["git", "worktree", "add", str(wt_path), "-b", branch, default_branch],
         cwd=str(real_repo),

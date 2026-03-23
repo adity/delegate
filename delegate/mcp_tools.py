@@ -421,13 +421,13 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     )
     async def task_assign(args: dict) -> dict:
         try:
-            from delegate.task import update_task, get_task
+            from delegate.task import assign_task, get_task
             from delegate.mailbox import send as send_message
 
             task_id = args["task_id"]
             assignee = args["assignee"]
 
-            update_task(hc_home, team, task_id, assignee=assignee)
+            assign_task(hc_home, team, task_id, assignee)
 
             # Auto-notify: send mailbox message so the assignee gets a turn
             if assignee != agent:
