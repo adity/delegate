@@ -435,7 +435,7 @@ export async function setTaskFreeze(team, config) {
 
 export async function fetchMaxTasks(team) {
   const r = await fetch(`/teams/${team}/max-tasks`);
-  return r.ok ? r.json() : { enabled: false, limit: 10 };
+  return r.ok ? r.json() : { enabled: false, limit_in_progress: 5, limit_queued: 10 };
 }
 
 export async function setMaxTasks(team, config) {

@@ -1583,13 +1583,15 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
     @app.post("/teams/{team}/max-tasks")
     def post_max_tasks(team: str, body: dict):
-        """Update max-tasks config (enabled, limit)."""
+        """Update max-tasks config (enabled, limit_in_progress, limit_queued)."""
         from delegate.config import update_max_tasks_config
         kwargs = {}
         if "enabled" in body:
             kwargs["enabled"] = bool(body["enabled"])
-        if "limit" in body:
-            kwargs["limit"] = int(body["limit"])
+        if "limit_in_progress" in body:
+            kwargs["limit_in_progress"] = int(body["limit_in_progress"])
+        if "limit_queued" in body:
+            kwargs["limit_queued"] = int(body["limit_queued"])
         return update_max_tasks_config(hc_home, team, **kwargs)
 
     # --- Workflow endpoints (team-scoped) ---

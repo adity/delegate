@@ -36,7 +36,8 @@ export function TasksPanel() {
   const [autoMerge, setAutoMerge] = useState(false);
   const [taskFreezeOn, setTaskFreezeOn] = useState(false);
   const [maxTasksEnabled, setMaxTasksEnabled] = useState(false);
-  const [maxTasksLimit, setMaxTasksLimit] = useState(10);
+  const [maxTasksInProgress, setMaxTasksInProgress] = useState(5);
+  const [maxTasksQueued, setMaxTasksQueued] = useState(10);
   const searchTimerRef = useRef(null);
   const prevStatusRef = useRef({});
 
@@ -138,7 +139,8 @@ export function TasksPanel() {
     fetchMaxTasks(team).then(data => {
       if (!cancelled) {
         setMaxTasksEnabled(!!data?.enabled);
-        setMaxTasksLimit(data?.limit ?? 10);
+        setMaxTasksInProgress(data?.limit_in_progress ?? 5);
+        setMaxTasksQueued(data?.limit_queued ?? 10);
       }
     });
     return () => { cancelled = true; };
@@ -169,14 +171,22 @@ export function TasksPanel() {
   const toggleMaxTasks = useCallback(() => {
     const next = !maxTasksEnabled;
     setMaxTasksEnabled(next);
-    setMaxTasks(team, { enabled: next, limit: maxTasksLimit });
-  }, [maxTasksEnabled, team, maxTasksLimit]);
+    setMaxTasks(team, { enabled: next, limit_in_progress: maxTasksInProgress, limit_queued: maxTasksQueued });
+  }, [maxTasksEnabled, team, maxTasksInProgress, maxTasksQueued]);
 
-  const updateMaxTasksLimit = useCallback((val) => {
-    const n = Math.max(1, parseInt(val) || 10);
-    setMaxTasksLimit(n);
+  const updateMaxTasksInProgress = useCallback((val) => {
+    const n = Math.max(1, parseInt(val) || 5);
+    setMaxTasksInProgress(n);
     if (maxTasksEnabled) {
-      setMaxTasks(team, { enabled: true, limit: n });
+      setMaxTasks(team, { enabled: true, limit_in_progress: n });
+    }
+  }, [maxTasksEnabled, team]);
+
+  const updateMaxTasksQueued = useCallback((val) => {
+    const n = Math.max(1, parseInt(val) || 10);
+    setMaxTasksQueued(n);
+    if (maxTasksEnabled) {
+      setMaxTasks(team, { enabled: true, limit_queued: n });
     }
   }, [maxTasksEnabled, team]);
 
@@ -440,7 +450,7 @@ export function TasksPanel() {
         <button
           class={`merge-sort-toggle${maxTasksEnabled ? " active" : ""}`}
           onClick={toggleMaxTasks}
-          title={maxTasksEnabled ? `Max tasks is ON — limit ${maxTasksLimit}` : "Enable max tasks limit"}
+          title={maxTasksEnabled ? `Max tasks ON — in-progress: ${maxTasksInProgress}, queued: ${maxTasksQueued}` : "Enable max tasks limit"}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor"
                strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -449,18 +459,34 @@ export function TasksPanel() {
           Max tasks
         </button>
         {maxTasksEnabled && (
-          <input
-            type="number"
-            min="1"
-            max="100"
-            value={maxTasksLimit}
-            onInput={(e) => updateMaxTasksLimit(e.target.value)}
-            onFocus={() => { isInputFocused.value = true; }}
-            onBlur={() => { isInputFocused.value = false; }}
-            class="max-tasks-input"
-            style={{ width: "48px", marginLeft: "4px", padding: "2px 4px", fontSize: "12px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", textAlign: "center" }}
-            title="Maximum active tasks"
-          />
+          <>
+            <span style={{ marginLeft: "6px", fontSize: "11px", color: "var(--text-secondary)" }}>WIP</span>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={maxTasksInProgress}
+              onInput={(e) => updateMaxTasksInProgress(e.target.value)}
+              onFocus={() => { isInputFocused.value = true; }}
+              onBlur={() => { isInputFocused.value = false; }}
+              class="max-tasks-input"
+              style={{ width: "40px", marginLeft: "2px", padding: "2px 4px", fontSize: "12px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", textAlign: "center" }}
+              title="Max in-progress tasks"
+            />
+            <span style={{ marginLeft: "6px", fontSize: "11px", color: "var(--text-secondary)" }}>Queue</span>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={maxTasksQueued}
+              onInput={(e) => updateMaxTasksQueued(e.target.value)}
+              onFocus={() => { isInputFocused.value = true; }}
+              onBlur={() => { isInputFocused.value = false; }}
+              class="max-tasks-input"
+              style={{ width: "40px", marginLeft: "2px", padding: "2px 4px", fontSize: "12px", borderRadius: "4px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", textAlign: "center" }}
+              title="Max queued tasks"
+            />
+          </>
         )}
         <div style={{ flex: 1 }} />
         <div class={searchExpanded ? "filter-search-wrap expanded" : "filter-search-wrap"}>

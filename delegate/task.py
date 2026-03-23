@@ -163,6 +163,19 @@ def create_task(
             "Disable the task freeze before creating new tasks."
         )
 
+    # Hard enforcement of max-tasks queue limit.
+    # New tasks are created with status='todo' (queued).
+    from delegate.config import get_max_tasks_config, _QUEUED_STATUSES
+    mt_cfg = get_max_tasks_config(hc_home, team)
+    if mt_cfg["enabled"]:
+        queued = [t for t in list_tasks(hc_home, team)
+                  if t.get("status") in _QUEUED_STATUSES]
+        if len(queued) >= mt_cfg["limit_queued"]:
+            raise ValueError(
+                f"Queue limit reached ({len(queued)}/{mt_cfg['limit_queued']} queued tasks). "
+                f"Complete or cancel existing queued tasks before creating new ones."
+            )
+
     if priority not in VALID_PRIORITIES:
         raise ValueError(f"Invalid priority '{priority}'. Must be one of: {VALID_PRIORITIES}")
 
@@ -681,6 +694,19 @@ def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_
     else:
         # Legacy validation
         _legacy_validate_transition(current, status)
+
+    # ── Hard enforcement of max-tasks in-progress limit ──
+    from delegate.config import get_max_tasks_config, _IN_PROGRESS_STATUSES
+    if status in _IN_PROGRESS_STATUSES and current not in _IN_PROGRESS_STATUSES:
+        mt_cfg = get_max_tasks_config(hc_home, team)
+        if mt_cfg["enabled"]:
+            in_prog = [t for t in list_tasks(hc_home, team)
+                       if t.get("status") in _IN_PROGRESS_STATUSES]
+            if len(in_prog) >= mt_cfg["limit_in_progress"]:
+                raise ValueError(
+                    f"In-progress limit reached ({len(in_prog)}/{mt_cfg['limit_in_progress']} tasks). "
+                    f"Complete existing in-progress tasks before starting new ones."
+                )
 
     # ── Run workflow hooks ──
     wf_def = None

@@ -541,26 +541,51 @@ def update_task_freeze_config(hc_home: Path, team: str, **kwargs) -> dict:
 # Max-tasks limit (per-team, stored in repos.yaml under 'max_tasks')
 # ---------------------------------------------------------------------------
 
-_MAX_TASKS_DEFAULTS = {"enabled": False, "limit": 10}
+_MAX_TASKS_DEFAULTS = {"enabled": False, "limit_in_progress": 5, "limit_queued": 10}
+
+# Statuses considered "in progress" (actively being worked).
+_IN_PROGRESS_STATUSES = frozenset({
+    "in_progress", "in_review", "in_approval", "merging",
+    "researching", "reporting", "rejected", "merge_failed",
+})
+
+# Statuses considered "queued" (waiting to start).
+_QUEUED_STATUSES = frozenset({"todo", "paused"})
 
 
 def get_max_tasks_config(hc_home: Path, team: str) -> dict:
-    """Return the max-tasks config for a team."""
+    """Return the max-tasks config for a team.
+
+    Handles backward compatibility: if the old single ``limit`` key is
+    present, it is mapped to both ``limit_in_progress`` and
+    ``limit_queued`` (and removed).
+    """
     data = _read_repos(hc_home, team)
     stored = data.get("max_tasks", {})
+
+    # Migrate legacy single "limit" field
+    if "limit" in stored and "limit_in_progress" not in stored:
+        old = stored.pop("limit")
+        stored["limit_in_progress"] = old
+        stored["limit_queued"] = old
+        data["max_tasks"] = stored
+        _write_repos(hc_home, team, data)
+
     return {**_MAX_TASKS_DEFAULTS, **stored}
 
 
 def update_max_tasks_config(hc_home: Path, team: str, **kwargs) -> dict:
-    """Update max-tasks config keys (enabled, limit).
+    """Update max-tasks config keys (enabled, limit_in_progress, limit_queued).
 
     Returns the updated config dict.
     """
     data = _read_repos(hc_home, team)
     current = data.get("max_tasks", {})
-    for key in ("enabled", "limit"):
+    for key in ("enabled", "limit_in_progress", "limit_queued"):
         if key in kwargs:
             current[key] = kwargs[key]
+    # Drop legacy key if present
+    current.pop("limit", None)
     data["max_tasks"] = current
     _write_repos(hc_home, team, data)
     return {**_MAX_TASKS_DEFAULTS, **current}

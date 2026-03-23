@@ -437,20 +437,22 @@ def build_system_prompt(
         mt_cfg = get_max_tasks_config(hc_home, team)
         if mt_cfg["enabled"]:
             from delegate.task import list_tasks
-            active = [t for t in list_tasks(hc_home, team)
-                      if t.get("status") not in ("done", "cancelled")]
-            active_count = len(active)
-            limit = mt_cfg["limit"]
-            if active_count >= limit:
-                max_tasks_notice = (
-                    f"\n** TASK LIMIT: {active_count}/{limit} active tasks. "
-                    "Do NOT create new tasks — limit reached. **\n"
-                )
+            from delegate.config import _IN_PROGRESS_STATUSES, _QUEUED_STATUSES
+            all_tasks = list_tasks(hc_home, team)
+            in_prog = len([t for t in all_tasks if t.get("status") in _IN_PROGRESS_STATUSES])
+            queued = len([t for t in all_tasks if t.get("status") in _QUEUED_STATUSES])
+            lip = mt_cfg["limit_in_progress"]
+            lq = mt_cfg["limit_queued"]
+            parts = []
+            if in_prog >= lip:
+                parts.append(f"In-progress: {in_prog}/{lip} — LIMIT REACHED")
             else:
-                max_tasks_notice = (
-                    f"\n** TASK LIMIT: {active_count}/{limit} active tasks. "
-                    "You may create tasks up to the limit. **\n"
-                )
+                parts.append(f"In-progress: {in_prog}/{lip}")
+            if queued >= lq:
+                parts.append(f"Queued: {queued}/{lq} — LIMIT REACHED, do NOT create new tasks")
+            else:
+                parts.append(f"Queued: {queued}/{lq}")
+            max_tasks_notice = f"\n** TASK LIMITS: {' | '.join(parts)} **\n"
 
     # --- 6. Reflections & feedback (inline if present) ---
     inlined_notes_block = ""
