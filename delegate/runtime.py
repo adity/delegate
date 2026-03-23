@@ -132,12 +132,12 @@ DENIED_BASH_PATTERNS = [
     "ALTER TABLE",
 ]
 
-# Git commands that the researcher role is allowed to use (for discarding
-# failed experiments via git reset --hard, and managing experiment branches).
-# These are removed from DISALLOWED_TOOLS and DENIED_BASH_PATTERNS when
-# creating a Telephone for a researcher agent.
+# Git commands that the researcher role is allowed to use beyond the
+# standard restrictions.  git checkout and git branch are needed for
+# managing experiment branches within the worktree.
+# NOTE: git reset --hard was removed — researchers now commit reverts
+# instead of discarding history, preserving a full audit trail.
 _RESEARCHER_GIT_ALLOWLIST = {
-    "git reset --hard",
     "git checkout",
     "git branch",
 }
@@ -146,9 +146,10 @@ _RESEARCHER_GIT_ALLOWLIST = {
 def _sandbox_for_role(role: str) -> tuple[list[str], list[str]]:
     """Return (disallowed_tools, denied_bash_patterns) adjusted for *role*.
 
-    Researchers need ``git reset --hard``, ``git checkout``, and
-    ``git branch`` to discard failed experiments and manage experiment
-    branches within their worktree.  All other restrictions remain.
+    Researchers need ``git checkout`` and ``git branch`` to manage
+    experiment branches within their worktree.  All other restrictions
+    remain.  ``git reset --hard`` is NOT allowed — researchers commit
+    reverts instead to preserve experiment history.
     """
     if role != "researcher":
         return DISALLOWED_TOOLS, list(DENIED_BASH_PATTERNS)

@@ -53,6 +53,33 @@ When in doubt, start with sonnet. If an agent struggles or
 the task turns out to be more complex than expected, reassign
 to an opus agent.
 
+### Role Selection Guide
+
+Match the task to the right role. If the team has specialized agents, prefer
+them over generic engineers for tasks in their domain:
+
+| Task type | Role | Workflow |
+|-----------|------|----------|
+| Feature work, bug fixes, general implementation | `engineer` | `default` |
+| Hyperparameter tuning, model optimization, iterative experimentation | `researcher` | `research` |
+| UI components, responsive layouts, accessibility | `frontend` | `default` |
+| API endpoints, data models, validation logic | `backend` | `default` |
+| Full-stack features touching both FE and BE | `fullstack` | `default` |
+| Code review (auto-assigned by review stage) | `reviewer` | — |
+| System design, architecture decisions | `architect` | `default` |
+| CI/CD, infra, deployment scripts | `devops` | `default` |
+| Test coverage, regression testing | `qa` | `default` |
+| Visual design, mockups, design tokens | `designer` | `default` |
+
+If no specialized agent exists for a role, fall back to `engineer`.
+
+**Research tasks require scaffolding first.** Before assigning a research
+task, verify that the codebase has the experiment infrastructure the
+researcher needs (training scripts, evaluation harnesses, metric logging).
+If not, create an engineering task to build it first and set the research
+task's `depends_on` accordingly. Researchers should modify existing code,
+not build infrastructure from scratch.
+
 ### DRI and Assignee
 
 - **DRI** is set automatically on first assignment and never changes. It anchors the branch name.

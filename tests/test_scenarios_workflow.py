@@ -554,15 +554,15 @@ class TestResearchWorkflowHappyPath:
 class TestResearcherSandbox:
     """Test that researcher role gets relaxed git restrictions."""
 
-    def test_researcher_sandbox_allows_reset(self):
-        """Researcher role should allow git reset --hard."""
+    def test_researcher_sandbox_allows_checkout_not_reset(self):
+        """Researcher role allows git checkout/branch but NOT git reset --hard."""
         from delegate.runtime import _sandbox_for_role
 
         disallowed, denied = _sandbox_for_role("researcher")
 
-        # git reset --hard should NOT be in the deny lists
-        assert not any("git reset --hard" in t for t in disallowed)
-        assert "git reset --hard" not in denied
+        # git reset --hard SHOULD still be denied (researchers commit reverts instead)
+        assert any("git reset --hard" in t for t in disallowed)
+        assert "git reset --hard" in denied
 
         # git checkout should NOT be in the deny lists
         assert not any("git checkout" in t for t in disallowed)

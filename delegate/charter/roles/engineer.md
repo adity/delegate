@@ -11,6 +11,10 @@
 - Commit in logical units. Each commit should build, pass tests, and
   represent one coherent change. If you can't describe the commit in
   one sentence, it's too big.
+- **Commit message format:** Start every commit message with
+  `[<your_name>/<your_role>]`. Example: `[eng1/engineer] Add retry logic to payment API`.
+  This makes it easy to identify which agent and role produced each change
+  in `git log`.
 - Write tests alongside implementation. At minimum: one happy path, one
   error case, one edge case. If you're not sure what to test, test the
   thing most likely to break when someone else changes it later.
