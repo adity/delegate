@@ -255,7 +255,7 @@ def find_claude_pids(
     return found
 
 
-def _sweep_orphaned_claude_processes() -> int:
+def sweep_orphaned_claude_processes() -> int:
     """Kill Claude processes reparented to PID 1 (orphans from a dead daemon).
 
     Returns the number of processes killed.
@@ -303,40 +303,33 @@ def stop_daemon(hc_home: Path, timeout: float = 15.0) -> bool:
     poll_interval = 0.1
     while time.time() - start_time < timeout:
         try:
-            os.kill(pid, 0)  # Check if process is still alive
+            os.kill(pid, 0)
             time.sleep(poll_interval)
         except (OSError, ProcessLookupError):
-            # Process is gone
             elapsed = time.time() - start_time
             logger.info("Daemon stopped (%.1fs)", elapsed)
-            pid_path = daemon_pid_path(hc_home)
-            pid_path.unlink(missing_ok=True)
-            _sweep_orphaned_claude_processes()
-            return True
-
-    # Timeout expired — force kill
-    logger.warning("Daemon did not stop after %.1fs — sending SIGKILL", timeout)
-    try:
-        os.kill(pid, signal.SIGKILL)
-        logger.info("Sent SIGKILL to daemon PID %d", pid)
-    except (OSError, ProcessLookupError) as e:
-        logger.warning("Failed to SIGKILL daemon PID %d: %s", pid, e)
-
-    # Wait briefly for SIGKILL to take effect
-    for _ in range(10):
+            break
+    else:
+        # Timeout expired — force kill
+        logger.warning("Daemon did not stop after %.1fs — sending SIGKILL", timeout)
         try:
-            os.kill(pid, 0)
-            time.sleep(0.1)
-        except (OSError, ProcessLookupError):
-            logger.info("Daemon force-killed")
-            pid_path = daemon_pid_path(hc_home)
-            pid_path.unlink(missing_ok=True)
-            _sweep_orphaned_claude_processes()
-            return True
+            os.kill(pid, signal.SIGKILL)
+            logger.info("Sent SIGKILL to daemon PID %d", pid)
+        except (OSError, ProcessLookupError) as e:
+            logger.warning("Failed to SIGKILL daemon PID %d: %s", pid, e)
 
-    # Still alive after SIGKILL (very unlikely)
-    logger.error("Daemon PID %d did not respond to SIGKILL", pid)
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.1)
+            except (OSError, ProcessLookupError):
+                logger.info("Daemon force-killed")
+                break
+        else:
+            logger.error("Daemon PID %d did not respond to SIGKILL", pid)
+
+    # Cleanup — always runs regardless of how the daemon exited
     pid_path = daemon_pid_path(hc_home)
     pid_path.unlink(missing_ok=True)
-    _sweep_orphaned_claude_processes()
+    sweep_orphaned_claude_processes()
     return True

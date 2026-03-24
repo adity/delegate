@@ -39,7 +39,10 @@ from delegate.paths import (
 )
 from delegate.mailbox import read_inbox
 from delegate.task import format_task_id
-from delegate.agent import DEFAULT_MODEL, DEFAULT_MANAGER_MODEL, ALLOWED_MODELS, SENIORITY_MAP
+from delegate.agent import (
+    DEFAULT_MODEL, DEFAULT_MANAGER_MODEL, ALLOWED_MODELS,
+    SENIORITY_MAP, resolve_model, build_max_tasks_notice,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +125,7 @@ class Prompt:
         self._ad = _resolve_agent_dir(hc_home, team, agent)
         self._state = yaml.safe_load((self._ad / "state.yaml").read_text()) or {}
         self._role = self._state.get("role", "engineer")
-        # Resolve model: prefer direct 'model' field, fall back from legacy 'seniority'
-        self._model = (
-            self._state.get("model")
-            or SENIORITY_MAP.get(self._state.get("seniority", ""), None)
-            or (DEFAULT_MANAGER_MODEL if self._role == "manager" else DEFAULT_MODEL)
-        )
+        self._model = resolve_model(self._state, self._role)
 
     # ------------------------------------------------------------------
     # Preamble (formerly: system prompt)
@@ -161,7 +159,7 @@ class Prompt:
         human_name = get_default_human(hc_home) or "human"
         manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"
 
-        from delegate.config import is_task_creation_frozen, get_max_tasks_config
+        from delegate.config import is_task_creation_frozen
         task_freeze_notice = ""
         if role == "manager" and is_task_creation_frozen(hc_home, team):
             task_freeze_notice = (
@@ -169,27 +167,7 @@ class Prompt:
                 "Continue managing existing tasks normally. **\n"
             )
 
-        max_tasks_notice = ""
-        if role == "manager":
-            mt_cfg = get_max_tasks_config(hc_home, team)
-            if mt_cfg["enabled"]:
-                from delegate.task import list_tasks
-                from delegate.task import IN_PROGRESS_STATUSES, QUEUED_STATUSES
-                all_tasks = list_tasks(hc_home, team)
-                in_prog = len([t for t in all_tasks if t.get("status") in IN_PROGRESS_STATUSES])
-                queued = len([t for t in all_tasks if t.get("status") in QUEUED_STATUSES])
-                lip = mt_cfg["limit_in_progress"]
-                lq = mt_cfg["limit_queued"]
-                parts = []
-                if in_prog >= lip:
-                    parts.append(f"In-progress: {in_prog}/{lip} — LIMIT REACHED")
-                else:
-                    parts.append(f"In-progress: {in_prog}/{lip}")
-                if queued >= lq:
-                    parts.append(f"Queued: {queued}/{lq} — LIMIT REACHED, do NOT create new tasks")
-                else:
-                    parts.append(f"Queued: {queued}/{lq}")
-                max_tasks_notice = f"\n** TASK LIMITS: {' | '.join(parts)} **\n"
+        max_tasks_notice = build_max_tasks_notice(hc_home, team) if role == "manager" else ""
 
         return f"""\
 === TEAM CHARTER ===

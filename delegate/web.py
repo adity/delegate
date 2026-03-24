@@ -796,7 +796,7 @@ async def _daemon_loop(
     from delegate.bootstrap import get_member_by_role
     from delegate.mailbox import send as send_message, agents_with_unread, agents_with_unread_prioritized
     from delegate.config import get_human_members
-    from delegate.task import format_task_id, list_tasks as _list_tasks_fn
+    from delegate.task import format_task_id, list_tasks as _list_tasks_fn, IN_PROGRESS_STATUSES, QUEUED_STATUSES
     from delegate.config import SYSTEM_USER
     from delegate.activity import broadcast_turn_event
 
@@ -1024,7 +1024,7 @@ async def _daemon_loop(
                             t for t in all_tasks
                             if t.get("assignee")
                             and t.get("assignee") != manager
-                            and t.get("status") in ("todo", "in_progress")
+                            and t.get("status") in (QUEUED_STATUSES | IN_PROGRESS_STATUSES)
                         ]
                         if not active_assigned:
                             continue
@@ -1200,8 +1200,8 @@ async def _lifespan(app: FastAPI):
         # Kill orphaned Claude processes from any previous daemon before
         # spawning new ones.  After restart, old orphans are reparented to
         # PID 1 and invisible to the periodic reaper.
-        from delegate.daemon import _sweep_orphaned_claude_processes
-        _sweep_orphaned_claude_processes()
+        from delegate.daemon import sweep_orphaned_claude_processes
+        sweep_orphaned_claude_processes()
 
         exchange = TelephoneExchange()
         global _exchange

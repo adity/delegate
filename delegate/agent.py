@@ -38,6 +38,38 @@ DEFAULT_MANAGER_MODEL = "sonnet"
 SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
 
 
+def resolve_model(state: dict, role: str) -> str:
+    """Resolve the model for an agent from its state and role."""
+    return (
+        state.get("model")
+        or SENIORITY_MAP.get(state.get("seniority", ""), None)
+        or (DEFAULT_MANAGER_MODEL if role == "manager" else DEFAULT_MODEL)
+    )
+
+
+def build_max_tasks_notice(hc_home, team: str) -> str:
+    """Build the max-tasks notice string for the manager prompt."""
+    from delegate.config import get_max_tasks_config
+    mt_cfg = get_max_tasks_config(hc_home, team)
+    if not mt_cfg["enabled"]:
+        return ""
+    from delegate.task import count_tasks_by_status, IN_PROGRESS_STATUSES, QUEUED_STATUSES
+    in_prog = count_tasks_by_status(hc_home, team, IN_PROGRESS_STATUSES)
+    queued = count_tasks_by_status(hc_home, team, QUEUED_STATUSES)
+    lip = mt_cfg["limit_in_progress"]
+    lq = mt_cfg["limit_queued"]
+    parts = []
+    if in_prog >= lip:
+        parts.append(f"In-progress: {in_prog}/{lip} — LIMIT REACHED")
+    else:
+        parts.append(f"In-progress: {in_prog}/{lip}")
+    if queued >= lq:
+        parts.append(f"Queued: {queued}/{lq} — LIMIT REACHED, do NOT create new tasks")
+    else:
+        parts.append(f"Queued: {queued}/{lq}")
+    return f"\n** TASK LIMITS: {' | '.join(parts)} **\n"
+
+
 # ---------------------------------------------------------------------------
 # AgentLogger — structured, per-agent session logger
 # ---------------------------------------------------------------------------
@@ -330,7 +362,7 @@ def build_system_prompt(
     state = yaml.safe_load((ad / "state.yaml").read_text()) or {}
     role = state.get("role", "engineer")
     # Resolve model: prefer "model" field, fall back from legacy "seniority"
-    model_name = state.get("model") or SENIORITY_MAP.get(state.get("seniority", ""), None) or (DEFAULT_MANAGER_MODEL if role == "manager" else DEFAULT_MODEL)
+    model_name = resolve_model(state, role)
     human_name = get_default_human(hc_home) or "human"
     manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"
 
@@ -411,7 +443,7 @@ def build_system_prompt(
     # --- 4–5. Agent identity + commands (stable per agent) ---
 
     # Task-freeze / max-tasks notices (manager only)
-    from delegate.config import is_task_creation_frozen, get_max_tasks_config
+    from delegate.config import is_task_creation_frozen
     task_freeze_notice = ""
     if role == "manager" and is_task_creation_frozen(hc_home, team):
         task_freeze_notice = (
@@ -419,27 +451,7 @@ def build_system_prompt(
             "Continue managing existing tasks normally. **\n"
         )
 
-    max_tasks_notice = ""
-    if role == "manager":
-        mt_cfg = get_max_tasks_config(hc_home, team)
-        if mt_cfg["enabled"]:
-            from delegate.task import list_tasks
-            from delegate.task import IN_PROGRESS_STATUSES, QUEUED_STATUSES
-            all_tasks = list_tasks(hc_home, team)
-            in_prog = len([t for t in all_tasks if t.get("status") in IN_PROGRESS_STATUSES])
-            queued = len([t for t in all_tasks if t.get("status") in QUEUED_STATUSES])
-            lip = mt_cfg["limit_in_progress"]
-            lq = mt_cfg["limit_queued"]
-            parts = []
-            if in_prog >= lip:
-                parts.append(f"In-progress: {in_prog}/{lip} — LIMIT REACHED")
-            else:
-                parts.append(f"In-progress: {in_prog}/{lip}")
-            if queued >= lq:
-                parts.append(f"Queued: {queued}/{lq} — LIMIT REACHED, do NOT create new tasks")
-            else:
-                parts.append(f"Queued: {queued}/{lq}")
-            max_tasks_notice = f"\n** TASK LIMITS: {' | '.join(parts)} **\n"
+    max_tasks_notice = build_max_tasks_notice(hc_home, team) if role == "manager" else ""
 
     # --- 6. Reflections & feedback (inline if present) ---
     inlined_notes_block = ""
