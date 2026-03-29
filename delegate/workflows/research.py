@@ -85,13 +85,30 @@ class Reporting(Stage):
     _transitions = {"done", "researching", "cancelled"}
 
     def enter(self, ctx):
-        # Notify the human that results are ready.
-        ctx.notify(
-            ctx.human,
-            f"Research results ready for T{ctx.task.id:04d}: "
-            f"{ctx.task.get('title', '(untitled)')}\n"
-            f"Please review the experiment log and results.",
-        )
+        # Build notification with inline results summary if available.
+        title = ctx.task.get("title", "(untitled)")
+        body = f"Research results ready for T{ctx.task.id:04d}: {title}\n"
+
+        results = ctx.get_metadata("results")
+        if results and isinstance(results, dict):
+            summary = results.get("summary", "")
+            total = results.get("total_experiments", "?")
+            kept = results.get("kept", "?")
+            baseline = results.get("baseline", {})
+            best = results.get("best", {})
+            if baseline and best:
+                metric = baseline.get("metric", "metric")
+                body += (
+                    f"\n{metric}: {baseline.get('value', '?')} → "
+                    f"{best.get('value', '?')} "
+                    f"({total} experiments, {kept} kept)\n"
+                )
+            if summary:
+                body += f"\n{summary}\n"
+        else:
+            body += "Please review the experiment log and results.\n"
+
+        ctx.notify(ctx.human, body)
 
     def assign(self, ctx):
         return ctx.human

@@ -121,20 +121,24 @@ hyperparameters, data pipelines, and configurations — not to write new
 infrastructure from scratch.
 
 - **NEVER create one-off runner scripts, experiment harnesses, training
-  loops, evaluation scripts, or plotting utilities.** If the codebase
-  lacks the scaffolding you need, send a message to the manager describing
-  exactly what infrastructure is missing and wait for it to be built by
-  an engineer. Do not build it yourself.
+  loops, evaluation scripts, or plotting utilities — not in the worktree,
+  not in `/tmp/`, not anywhere.** Writing a throwaway script to `/tmp/`
+  is still creating scaffolding; it wastes tokens, bypasses the project's
+  existing infrastructure, and leaves invisible side-effects. If the
+  codebase lacks the scaffolding you need, send a message to the manager
+  describing exactly what infrastructure is missing and wait for it to be
+  built by an engineer. Do not build it yourself.
 - **You MAY modify existing code** when the experiment requires fundamental
   changes: swapping model architectures, adding new layers, changing data
   preprocessing, adjusting optimization strategies, etc. These are real
   research changes, not scaffolding.
 - **You MAY create small configuration files** (YAML, JSON) to parameterize
   experiments. These are data, not code.
-- **You MAY NOT create new Python files** unless they are genuinely new model
-  components (a new network architecture, a new loss function). If you find
-  yourself writing a `run_experiment.py` or `eval_metrics.py`, STOP — that
-  is scaffolding. Ask the manager for it.
+- **You MAY NOT create new Python files** — not in the worktree, not in
+  `/tmp/`, not anywhere — unless they are genuinely new model components
+  (a new network architecture, a new loss function). If you find yourself
+  writing a `run_experiment.py`, `eval_metrics.py`, or `/tmp/quick_test.py`,
+  STOP — that is scaffolding. Ask the manager for it.
 
 The goal is to minimize token usage and regression risk. Every new file you
 create is code that must be reviewed, tested, and maintained. Modify what
@@ -185,26 +189,74 @@ that don't belong in git. Use the artifact system:
   simplification. Keep it.
 - Weigh complexity cost against improvement magnitude.
 
+### Token Efficiency
+
+Every token you consume costs money and context window capacity. Minimize
+waste without sacrificing experiment quality:
+
+- **Read selectively.** Use offset/limit to read only the section of a file
+  you need. Never re-read a file you haven't changed since your last read.
+- **Extract metrics surgically.** After an experiment finishes, `tail` or
+  `grep` the log for the final metric line instead of reading the full output.
+  Redirect verbose training output to a file (`> log.txt 2>&1`) and only
+  inspect the summary.
+- **Skip commentary.** Don't narrate what you're about to do or reflect on
+  what you just did. Act, record the result, move on.
+- **Batch small decisions.** If you need to try 3 hyperparameter values,
+  plan all three upfront and run them in sequence rather than deliberating
+  between each one.
+- **Don't re-explore.** Read results.tsv at the start of each turn. If a
+  configuration was already tested, skip it — no need to re-read surrounding
+  code to "rediscover" why it failed.
+- **Compact commit messages and comments.** One line per experiment in
+  results.tsv. Commit messages should be factual, not narrative.
+
 ### Reporting & Deployment Handoff
 
-- When you've exhausted your ideas or made significant progress, send a
-  summary message to the manager with:
-  - Number of experiments run
-  - Best metric achieved vs baseline
-  - Key findings (what worked, what didn't)
-  - The results file path for full details
-- If your research produces deployable artifacts (trained outputs, config
-  changes), include a structured output in a task comment:
-  ```
-  task_comment(task_id, body=json.dumps({
-    "deployment_config": {
-      "output.path": "/path/to/artifact",
-      "output.version": "v3",
-    },
-    "config_file": "config/settings.yaml",
-    "validation_metrics": {"primary_metric": 1.42, "secondary_metric": 0.08},
-  }))
-  ```
-  This structured output enables the manager to create a follow-up
-  engineering task that deploys your outputs through the standard
-  review/merge pipeline.
+When you've exhausted your ideas or made significant progress and are ready
+to transition to **reporting**, you MUST do the following **before** changing
+the task status:
+
+1. **Write a results summary as a task comment.** This is the primary
+   deliverable the human reviews. Use the following structure:
+
+   ```
+   task_comment(task_id, body=json.dumps({
+     "results": {
+       "baseline": {"metric": "<name>", "value": <number>},
+       "best": {"metric": "<name>", "value": <number>, "experiment": <N>},
+       "total_experiments": <N>,
+       "kept": <N>,
+       "discarded": <N>,
+       "summary": "<1-3 sentence plain-English summary of what worked and what didn't>",
+       "key_changes": [
+         "<commit-message-style description of each kept change>"
+       ]
+     },
+     "deployment_config": {
+       "output.path": "/path/to/artifact",
+       "output.version": "v3"
+     },
+     "config_file": "config/settings.yaml",
+     "validation_metrics": {"primary_metric": 1.42, "secondary_metric": 0.08}
+   }))
+   ```
+
+   The `results` block is **mandatory**. The `deployment_config` and
+   `validation_metrics` blocks are optional — include them only when
+   the research produces deployable artifacts.
+
+2. **Store results in task metadata** so the workflow can surface them
+   in notifications:
+   ```
+   task_update(task_id, metadata={"results": { ...same results dict... }})
+   ```
+
+3. **Send a brief summary** to the manager via `mailbox_send` with the
+   headline metric improvement and number of experiments.
+
+4. **Then** transition the task to reporting.
+
+This structured results comment enables the human to review outcomes at a
+glance without digging through logs, and enables the manager to create
+follow-up engineering tasks when deployment is needed.
