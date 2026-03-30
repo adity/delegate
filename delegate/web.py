@@ -490,7 +490,7 @@ def _build_greeting(
             messages = read_inbox(hc_home, team, human, unread_only=False)
             new_messages = [
                 m for m in messages
-                if datetime.fromisoformat(m["created_at"].replace("Z", "+00:00")) > last_seen
+                if datetime.fromisoformat(m.time.replace("Z", "+00:00")) > last_seen
             ]
             if new_messages:
                 away_parts.append(f"{len(new_messages)} new message{'s' if len(new_messages) != 1 else ''}")
@@ -1919,8 +1919,6 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             400: Invalid file type or file too large
             413: Payload too large
         """
-        from fastapi import UploadFile
-        from datetime import datetime, timezone
         from delegate.uploads import (
             validate_file,
             validate_file_size,
@@ -2273,7 +2271,10 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         # 1d. No duplicate project name
         from delegate.db import get_connection
         conn = get_connection(hc_home)
-        existing = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
+        try:
+            existing = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
+        finally:
+            conn.close()
         if existing:
             raise HTTPException(status_code=409, detail=f"Project '{name}' already exists")
 

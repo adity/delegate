@@ -521,10 +521,11 @@ def run_cleanup(
                     result.errors.append(f"Failed to remove daemon log {lf}: {e}")
 
     logger.info(
-        "Cleanup complete: freed %d MB, %d sessions, %d messages, %d worktrees, %d venvs, %d caches",
+        "Cleanup complete: freed %d MB, %d sessions, %d messages, %d reviews, %d worktrees, %d venvs, %d caches",
         result.bytes_freed // (1024 * 1024),
         result.sessions_deleted,
         result.messages_deleted,
+        result.reviews_deleted,
         result.worktrees_removed,
         result.venvs_removed,
         result.pkg_caches_cleared,

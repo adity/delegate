@@ -12,7 +12,6 @@ The actual turn execution loop lives in ``delegate.runtime``.
 """
 
 import logging
-import re
 import sys
 import time
 from pathlib import Path
@@ -21,7 +20,7 @@ from typing import Any
 import yaml
 
 from delegate.paths import agent_dir as _resolve_agent_dir, agents_dir, base_charter_dir
-from delegate.mailbox import read_inbox, recent_processed
+from delegate.mailbox import read_inbox
 from delegate.task import format_task_id
 
 logger = logging.getLogger(__name__)
@@ -260,12 +259,6 @@ def _read_state(ad: Path) -> dict:
     return {}
 
 
-def _write_state(ad: Path, state: dict) -> None:
-    (ad / "state.yaml").write_text(
-        yaml.dump(state, default_flow_style=False)
-    )
-
-
 def _next_worklog_number(ad: Path) -> int:
     logs_dir = ad / "logs"
     if not logs_dir.is_dir():
@@ -298,33 +291,6 @@ def _get_current_task_id(hc_home: Path, team: str, agent: str) -> int | None:
     """Get the ID of the agent's current task, if exactly one."""
     task = _get_current_task(hc_home, team, agent)
     return task["id"] if task else None
-
-
-# ---------------------------------------------------------------------------
-# Git worktree helpers
-# ---------------------------------------------------------------------------
-
-def _slugify(title: str, max_len: int = 40) -> str:
-    """Convert a task title to a branch-safe slug.
-
-    Example: "Build the REST API endpoint" -> "build-the-rest-api-endpoint"
-    """
-    slug = title.lower().strip()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    slug = slug.strip("-")
-    return slug[:max_len].rstrip("-")
-
-
-def _branch_name(hc_home: Path, team: str, task_id: int, title: str = "") -> str:
-    """Compute the branch name for a task.
-
-    Format: ``delegate/<team_id>/<team>/T<task_id>``
-    The team_id (6-char hex) prevents collisions when a team is deleted and
-    recreated; the team name keeps branches human-readable.
-    """
-    from delegate.paths import get_team_id
-    tid = get_team_id(hc_home, team)
-    return f"delegate/{tid}/{team}/{format_task_id(task_id)}"
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,6 @@ Usage:
     delegate repo update <team> <name> <new_path>
 """
 
-import json
 import logging
 import re
 import subprocess

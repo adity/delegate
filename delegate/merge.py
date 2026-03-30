@@ -473,8 +473,11 @@ _run_pipeline = _run_pre_merge
 # Fast-forward merge (operates on refs only — no checkout needed)
 # ---------------------------------------------------------------------------
 
-def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
-    """Fast-forward merge the branch into the default branch.
+def _ff_merge_impl(repo_dir: str, tip: str, *, resolve_tip: bool) -> tuple[bool, str]:
+    """Core fast-forward merge logic.
+
+    If *resolve_tip* is True, *tip* is treated as a branch name and resolved
+    to its commit SHA.  If False, *tip* is treated as a raw commit SHA.
 
     Behaviour depends on the user's checkout state in the main repo:
 
@@ -488,18 +491,24 @@ def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
     """
     db = get_default_branch(repo_dir)
 
-    # Get branch tip
-    branch_result = _run_git(["rev-parse", branch], cwd=repo_dir)
-    if branch_result.returncode != 0:
-        return False, f"Could not resolve {branch}: {branch_result.stderr}"
-    branch_tip = branch_result.stdout.strip()
+    # Resolve or verify the tip commit
+    if resolve_tip:
+        branch_result = _run_git(["rev-parse", tip], cwd=repo_dir)
+        if branch_result.returncode != 0:
+            return False, f"Could not resolve {tip}: {branch_result.stderr}"
+        tip_sha = branch_result.stdout.strip()
+    else:
+        verify = _run_git(["cat-file", "-e", tip], cwd=repo_dir)
+        if verify.returncode != 0:
+            return False, f"Commit not found: {tip}"
+        tip_sha = tip
 
-    # Verify branch is a descendant of the default branch (fast-forward check)
+    # Verify tip is a descendant of the default branch (fast-forward check)
     ancestor_check = _run_git(
-        ["merge-base", "--is-ancestor", db, branch], cwd=repo_dir,
+        ["merge-base", "--is-ancestor", db, tip_sha], cwd=repo_dir,
     )
     if ancestor_check.returncode != 0:
-        return False, f"Fast-forward not possible: {branch} is not a descendant of {db}"
+        return False, f"Fast-forward not possible: {tip_sha[:12]} is not a descendant of {db}"
 
     # Check what the user has checked out in the main repo
     head_result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
@@ -517,10 +526,10 @@ def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
             )
 
         # Clean checkout: use merge --ff-only to update ref + working tree
-        result = _run_git(["merge", "--ff-only", branch], cwd=repo_dir)
+        result = _run_git(["merge", "--ff-only", tip_sha], cwd=repo_dir)
         if result.returncode != 0:
             return False, f"Fast-forward merge failed: {result.stderr}"
-        return True, f"{db} fast-forwarded to {branch_tip[:12]} (working tree updated)"
+        return True, f"{db} fast-forwarded to {tip_sha[:12]} (working tree updated)"
 
     else:
         # User is on another branch: move ref only via atomic CAS
@@ -530,12 +539,22 @@ def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
         main_tip = main_result.stdout.strip()
 
         result = _run_git(
-            ["update-ref", f"refs/heads/{db}", branch_tip, main_tip],
+            ["update-ref", f"refs/heads/{db}", tip_sha, main_tip],
             cwd=repo_dir,
         )
         if result.returncode != 0:
             return False, f"Atomic update-ref failed (concurrent push?): {result.stderr}"
-        return True, f"{db} fast-forwarded to {branch_tip[:12]} (ref-only, user on {user_branch})"
+        return True, f"{db} fast-forwarded to {tip_sha[:12]} (ref-only, user on {user_branch})"
+
+
+def _ff_merge(repo_dir: str, branch: str) -> tuple[bool, str]:
+    """Fast-forward merge a branch into the default branch."""
+    return _ff_merge_impl(repo_dir, branch, resolve_tip=True)
+
+
+def _ff_merge_to_sha(repo_dir: str, tip_sha: str) -> tuple[bool, str]:
+    """Fast-forward merge the default branch to a specific commit SHA."""
+    return _ff_merge_impl(repo_dir, tip_sha, resolve_tip=False)
 
 
 def _reconcile_main_prefer_files(
@@ -585,69 +604,6 @@ def _reconcile_main_prefer_files(
     _run_git(["commit", "--amend", "--no-edit"], cwd=wt_dir)
 
     return to_reset
-
-
-def _ff_merge_to_sha(repo_dir: str, tip_sha: str) -> tuple[bool, str]:
-    """Fast-forward merge the default branch to a specific commit SHA.
-
-    Used after the disposable worktree is removed — we have the rebased tip
-    SHA but no longer have a branch ref for it (the temp branch is gone).
-
-    Behaviour mirrors ``_ff_merge``:
-    - default branch checked out + dirty → fail (protect uncommitted work)
-    - default branch checked out + clean → ``git merge --ff-only <sha>``
-    - other branch checked out → ``git update-ref`` CAS to sha
-
-    Returns ``(success, output)``.
-    """
-    db = get_default_branch(repo_dir)
-
-    # Verify tip_sha is an ancestor of nothing — just check it exists
-    verify = _run_git(["cat-file", "-e", tip_sha], cwd=repo_dir)
-    if verify.returncode != 0:
-        return False, f"Commit not found: {tip_sha}"
-
-    # Verify tip is a descendant of the default branch (fast-forward check)
-    ancestor_check = _run_git(
-        ["merge-base", "--is-ancestor", db, tip_sha], cwd=repo_dir,
-    )
-    if ancestor_check.returncode != 0:
-        return False, f"Fast-forward not possible: {tip_sha[:12]} is not a descendant of {db}"
-
-    # Check what the user has checked out in the main repo
-    head_result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
-    user_branch = head_result.stdout.strip() if head_result.returncode == 0 else ""
-
-    if user_branch == db:
-        # User is on the default branch — check for uncommitted changes
-        status_result = _run_git(["status", "--porcelain"], cwd=repo_dir)
-        dirty = status_result.stdout.strip()
-        if dirty:
-            return False, (
-                f"Main repo has uncommitted changes on {db} — "
-                "commit or stash them before merging.\n"
-                f"Dirty files:\n{dirty[:500]}"
-            )
-
-        result = _run_git(["merge", "--ff-only", tip_sha], cwd=repo_dir)
-        if result.returncode != 0:
-            return False, f"Fast-forward merge failed: {result.stderr}"
-        return True, f"{db} fast-forwarded to {tip_sha[:12]} (working tree updated)"
-
-    else:
-        # User is on another branch: move ref only via atomic CAS
-        main_result = _run_git(["rev-parse", db], cwd=repo_dir)
-        if main_result.returncode != 0:
-            return False, f"Could not resolve {db}: {main_result.stderr}"
-        main_tip = main_result.stdout.strip()
-
-        result = _run_git(
-            ["update-ref", f"refs/heads/{db}", tip_sha, main_tip],
-            cwd=repo_dir,
-        )
-        if result.returncode != 0:
-            return False, f"Atomic update-ref failed (concurrent push?): {result.stderr}"
-        return True, f"{db} fast-forwarded to {tip_sha[:12]} (ref-only, user on {user_branch})"
 
 
 # ---------------------------------------------------------------------------
@@ -1345,11 +1301,7 @@ def merge_once(
         result = merge_task(hc_home, team, task_id)
         results.append(result)
 
-        if result.success:
-            # Successful merge — clear retry_after (task is done, but belt+suspenders)
-            # merge_task sets status to 'done', so this is just defensive cleanup.
-            pass
-        else:
+        if not result.success:
             _handle_merge_failure(hc_home, team, task_id, result)
 
     return results

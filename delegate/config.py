@@ -529,9 +529,8 @@ def update_task_freeze_config(hc_home: Path, team: str, **kwargs) -> dict:
     """
     data = _read_repos(hc_home, team)
     current = data.get("task_freeze", {})
-    for key in ("enabled",):
-        if key in kwargs:
-            current[key] = kwargs[key]
+    if "enabled" in kwargs:
+        current["enabled"] = kwargs["enabled"]
     data["task_freeze"] = current
     _write_repos(hc_home, team, data)
     return {**_TASK_FREEZE_DEFAULTS, **current}

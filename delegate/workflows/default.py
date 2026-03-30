@@ -14,6 +14,8 @@ Usage:
         delegate workflow add myteam delegate/workflows/default.py
 """
 
+from datetime import datetime, timezone
+
 from delegate.workflow import Stage, workflow
 
 # Import git mixin so ctx gets git methods
@@ -121,7 +123,6 @@ class Done(Stage):
     terminal = True
 
     def enter(self, ctx):
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         ctx.task.update(completed_at=now)
 
@@ -164,7 +165,6 @@ class Cancelled(Stage):
     terminal = True
 
     def enter(self, ctx):
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         ctx.task.update(completed_at=now, assignee="")
         # Best-effort worktree cleanup

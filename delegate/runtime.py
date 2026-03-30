@@ -204,7 +204,7 @@ class TelephoneExchange:
             try:
                 await tel.close()
             except Exception:
-                pass
+                logger.debug("Error closing Telephone", exc_info=True)
         self._telephones.clear()
 
 
@@ -848,7 +848,7 @@ async def run_turn(
             from delegate.task import get_task as _get_task
             current_task = await _to_db(_get_task, hc_home, team, current_task_id)
         except Exception:
-            logger.debug("Could not resolve task %s", current_task_id)
+            logger.warning("Could not resolve task %s", current_task_id, exc_info=True)
 
     # --- Skip cancelled/done tasks: mark messages processed and return ---
     # Messages are already marked seen by claim_inbox_batch above.
@@ -988,7 +988,7 @@ async def run_turn(
     user_msg = prompt_builder.build_user_message(
         messages=batch,
         current_task=current_task,
-        workspace_paths=workspace_paths or None,
+        workspace_paths=workspace_paths,
     )
 
     task_label = format_task_id(current_task_id) if current_task_id else ""

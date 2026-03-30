@@ -19,6 +19,7 @@ import logging
 import re
 from pathlib import Path
 
+from delegate.chat import log_event as _log_event
 from delegate.config import get_reviewer_config
 from delegate.review import get_current_review, set_verdict
 from delegate.task import (
@@ -175,7 +176,6 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
             from delegate.notify import notify_sensitive_skip
             notify_sensitive_skip(hc_home, team, task, sensitive)
 
-            from delegate.chat import log_event as _log_event
             _log_event(hc_home, team,
                        f"{format_task_id(task_id)} auto-approve skipped — sensitive files require human review",
                        task_id=task_id)
@@ -211,7 +211,6 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
                         summary=reasoning, reviewer="auto-approver")
         _update_task(hc_home, team, task_id, approval_status="approved")
 
-        from delegate.chat import log_event as _log_event
         _log_event(hc_home, team,
                    f"{format_task_id(task_id)} auto-approved (avg {avg:.1f}/{threshold}) ✓",
                    task_id=task_id)
@@ -233,7 +232,6 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
         from delegate.notify import notify_rejection
         notify_rejection(hc_home, team, task, reason=f"Auto-approver rejected (avg {avg:.1f} < {threshold}): {reasoning}")
 
-        from delegate.chat import log_event as _log_event
         _log_event(hc_home, team,
                    f"{format_task_id(task_id)} auto-rejected (avg {avg:.1f}/{threshold})",
                    task_id=task_id)

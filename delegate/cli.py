@@ -328,6 +328,7 @@ def team_create(
     """Create a new team."""
     from delegate.bootstrap import bootstrap, validate_project_name
     from delegate.repo import register_repo
+    from delegate.runtime import list_ai_agents
     from delegate.fmt import success, warn
 
     hc_home = _get_home(ctx)
@@ -346,7 +347,6 @@ def team_create(
         count = int(agents_stripped)
         from delegate.names import pick_names
         from delegate.config import get_default_human
-        from delegate.runtime import list_ai_agents
         from delegate.paths import teams_dir
 
         # Exclude human member name, manager name, and all existing agent names
@@ -415,7 +415,6 @@ def team_create(
 
     # Detect whether the team already exists before bootstrap
     from delegate.paths import team_dir as _team_dir_resolved
-    from delegate.runtime import list_ai_agents
     team_existed = _team_dir_resolved(hc_home, name).is_dir()
     existing_agents = set(list_ai_agents(hc_home, name)) if team_existed else set()
 

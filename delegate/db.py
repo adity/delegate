@@ -218,6 +218,20 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
         # V16 not yet applied, skip UUID column backfill
         return
 
+    def _resolve_member_uuid(team_uuid: str, name: str, default: str = '') -> str:
+        """Resolve a member name to its UUID (try agent, then human)."""
+        row = conn.execute(
+            "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
+            (team_uuid, name)
+        ).fetchone()
+        if row:
+            return row[0]
+        row = conn.execute(
+            "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
+            (name,)
+        ).fetchone()
+        return row[0] if row else default
+
     # Determine project/team column name used in data tables (project or team)
     proj_col = "project" if "project" in columns else "team"
 
@@ -245,39 +259,9 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
             continue
         team_uuid = team_uuid_row[0]
 
-        # Resolve sender (try agent first, then human)
-        sender_uuid = None
-        row = conn.execute(
-            "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-            (team_uuid, sender)
-        ).fetchone()
-        if row:
-            sender_uuid = row[0]
-        else:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                (sender,)
-            ).fetchone()
-            if row:
-                sender_uuid = row[0]
+        sender_uuid = _resolve_member_uuid(team_uuid, sender, default=None)
+        recipient_uuid = _resolve_member_uuid(team_uuid, recipient, default=None)
 
-        # Resolve recipient
-        recipient_uuid = None
-        row = conn.execute(
-            "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-            (team_uuid, recipient)
-        ).fetchone()
-        if row:
-            recipient_uuid = row[0]
-        else:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                (recipient,)
-            ).fetchone()
-            if row:
-                recipient_uuid = row[0]
-
-        # Update message
         if sender_uuid and recipient_uuid:
             conn.execute(
                 "UPDATE messages SET sender_uuid = ?, recipient_uuid = ? WHERE id = ?",
@@ -315,39 +299,8 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
             continue
         team_uuid = team_uuid_row[0]
 
-        # Resolve DRI (flexible)
-        dri_uuid = ''
-        if dri:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-                (team_uuid, dri)
-            ).fetchone()
-            if row:
-                dri_uuid = row[0]
-            else:
-                row = conn.execute(
-                    "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                    (dri,)
-                ).fetchone()
-                if row:
-                    dri_uuid = row[0]
-
-        # Resolve assignee (flexible)
-        assignee_uuid = ''
-        if assignee:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-                (team_uuid, assignee)
-            ).fetchone()
-            if row:
-                assignee_uuid = row[0]
-            else:
-                row = conn.execute(
-                    "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                    (assignee,)
-                ).fetchone()
-                if row:
-                    assignee_uuid = row[0]
+        dri_uuid = _resolve_member_uuid(team_uuid, dri) if dri else ''
+        assignee_uuid = _resolve_member_uuid(team_uuid, assignee) if assignee else ''
 
         conn.execute(
             f"UPDATE tasks SET {uuid_col} = ?, dri_uuid = ?, assignee_uuid = ? WHERE id = ?",
@@ -381,23 +334,7 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
         ).fetchone()
         if not team_uuid_row:
             continue
-        team_uuid = team_uuid_row[0]
-
-        author_uuid = ''
-        row = conn.execute(
-            "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-            (team_uuid, author)
-        ).fetchone()
-        if row:
-            author_uuid = row[0]
-        else:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                (author,)
-            ).fetchone()
-            if row:
-                author_uuid = row[0]
-
+        author_uuid = _resolve_member_uuid(team_uuid_row[0], author)
         if author_uuid:
             conn.execute(
                 "UPDATE task_comments SET author_uuid = ? WHERE id = ?",
@@ -418,22 +355,7 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
         if not team_uuid_row:
             continue
         team_uuid = team_uuid_row[0]
-
-        reviewer_uuid = ''
-        if reviewer:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-                (team_uuid, reviewer)
-            ).fetchone()
-            if row:
-                reviewer_uuid = row[0]
-            else:
-                row = conn.execute(
-                    "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                    (reviewer,)
-                ).fetchone()
-                if row:
-                    reviewer_uuid = row[0]
+        reviewer_uuid = _resolve_member_uuid(team_uuid, reviewer) if reviewer else ''
 
         conn.execute(
             f"UPDATE reviews SET {uuid_col} = ?, reviewer_uuid = ? WHERE id = ?",
@@ -453,23 +375,7 @@ f"INSERT OR IGNORE INTO {ids_table} (uuid, name) VALUES (?, ?)",
         ).fetchone()
         if not team_uuid_row:
             continue
-        team_uuid = team_uuid_row[0]
-
-        author_uuid = ''
-        row = conn.execute(
-            "SELECT uuid FROM member_ids WHERE kind = 'agent' AND team_uuid = ? AND name = ? AND deleted = 0",
-            (team_uuid, author)
-        ).fetchone()
-        if row:
-            author_uuid = row[0]
-        else:
-            row = conn.execute(
-                "SELECT uuid FROM member_ids WHERE kind = 'human' AND team_uuid IS NULL AND name = ? AND deleted = 0",
-                (author,)
-            ).fetchone()
-            if row:
-                author_uuid = row[0]
-
+        author_uuid = _resolve_member_uuid(team_uuid_row[0], author)
         if author_uuid:
             conn.execute(
                 "UPDATE review_comments SET author_uuid = ? WHERE id = ?",

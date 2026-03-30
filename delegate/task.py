@@ -539,7 +539,6 @@ def _validate_review_gate(hc_home: Path, team: str, task: dict) -> None:
     1. The worktree has uncommitted changes.
     2. The worktree has a different branch checked out than expected.
     """
-    import subprocess
     from delegate.paths import task_worktree_dir
 
     repos: list[str] = task.get("repo", [])
@@ -609,15 +608,13 @@ def _atomic_status_update(
 
     Returns the updated task dict.
     """
-    import json as _json
-
     updates["updated_at"] = _now()
     set_parts = []
     params: list = []
     for key, value in updates.items():
         set_parts.append(f"{key} = ?")
         if key in _JSON_COLUMNS:
-            params.append(_json.dumps(value) if isinstance(value, (dict, list)) else (value or "{}"))
+            params.append(json.dumps(value) if isinstance(value, (dict, list)) else (value or "{}"))
         else:
             params.append(value)
     team_uuid = _team(hc_home, team)
@@ -963,8 +960,6 @@ def cancel_task(hc_home: Path, team: str, task_id: int) -> dict:
 
 def _cleanup_cancelled_task(hc_home: Path, team: str, task: dict) -> None:
     """Remove worktrees and feature branch for a cancelled task (best-effort)."""
-    _log = logging.getLogger(__name__)
-
     branch: str = task.get("branch", "")
     repos: list[str] = task.get("repo", [])
 
@@ -988,7 +983,6 @@ def _cleanup_cancelled_task(hc_home: Path, team: str, task: dict) -> None:
 
             # Delete the feature branch (best-effort; -D to force)
             if branch:
-                import subprocess
                 subprocess.run(
                     ["git", "branch", "-D", branch],
                     cwd=real_repo,
