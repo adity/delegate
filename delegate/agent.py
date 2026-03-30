@@ -361,7 +361,6 @@ def build_system_prompt(
 
     state = yaml.safe_load((ad / "state.yaml").read_text()) or {}
     role = state.get("role", "engineer")
-    # Resolve model: prefer "model" field, fall back from legacy "seniority"
     model_name = resolve_model(state, role)
     human_name = get_default_human(hc_home) or "human"
     manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"

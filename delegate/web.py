@@ -875,6 +875,8 @@ async def _daemon_loop(
     from delegate.config import SYSTEM_USER
     from delegate.activity import broadcast_turn_event
 
+    _ACTIVE_STATUSES = QUEUED_STATUSES | IN_PROGRESS_STATUSES  # precomputed union
+
     logger.info("Daemon loop started — polling every %.1fs", interval)
 
     human_names = [m["name"] for m in get_human_members(hc_home)]
@@ -1093,18 +1095,24 @@ async def _daemon_loop(
                     last_nudge_clear = now
                 for team in teams:
                     try:
-                        manager = await _run_in_db_pool(get_member_by_role, hc_home, team, "manager")
-                        all_tasks = await _run_in_db_pool(_list_tasks_fn, hc_home, team)
+                        manager, all_tasks = await asyncio.gather(
+                            _run_in_db_pool(get_member_by_role, hc_home, team, "manager"),
+                            _run_in_db_pool(_list_tasks_fn, hc_home, team),
+                        )
                         active_assigned = [
                             t for t in all_tasks
                             if t.get("assignee")
                             and t.get("assignee") != manager
-                            and t.get("status") in (QUEUED_STATUSES | IN_PROGRESS_STATUSES)
+                            and t.get("status") in _ACTIVE_STATUSES
                         ]
                         if not active_assigned:
                             continue
-                        unread_agents = set(await _run_in_db_pool(agents_with_unread, hc_home, team))
-                        ai_agent_set = set(await _run_in_db_pool(list_ai_agents, hc_home, team))
+                        unread_agents_raw, ai_agents_raw = await asyncio.gather(
+                            _run_in_db_pool(agents_with_unread, hc_home, team),
+                            _run_in_db_pool(list_ai_agents, hc_home, team),
+                        )
+                        unread_agents = set(unread_agents_raw)
+                        ai_agent_set = set(ai_agents_raw)
                         for t in active_assigned:
                             assignee = t["assignee"]
                             tid = t["id"]

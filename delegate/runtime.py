@@ -135,8 +135,6 @@ DENIED_BASH_PATTERNS = [
 # Git commands that the researcher role is allowed to use beyond the
 # standard restrictions.  git checkout and git branch are needed for
 # managing experiment branches within the worktree.
-# NOTE: git reset --hard was removed — researchers now commit reverts
-# instead of discarding history, preserving a full audit trail.
 _RESEARCHER_GIT_ALLOWLIST = {
     "git checkout",
     "git branch",
@@ -819,7 +817,6 @@ async def run_turn(
 
     # Set logging caller context for all log lines during this turn
     _prev_caller = log_caller.set(f"{agent}:{role}")
-    # Resolve model: prefer direct 'model' field, fall back from legacy 'seniority'
     from delegate.agent import resolve_model
     model = resolve_model(state, role)
     token_budget = state.get("token_budget")

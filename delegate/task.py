@@ -164,17 +164,12 @@ def create_task(
     if not assignee or not assignee.strip():
         raise ValueError("Assignee/DRI is required when creating a task")
 
-    # Hard enforcement of task-creation freeze.
-    from delegate.config import is_task_creation_frozen
+    from delegate.config import is_task_creation_frozen, get_max_tasks_config
     if is_task_creation_frozen(hc_home, team):
         raise ValueError(
             "Task creation is frozen for this team. "
             "Disable the task freeze before creating new tasks."
         )
-
-    # Hard enforcement of max-tasks queue limit.
-    # New tasks are created with status='todo' (queued).
-    from delegate.config import get_max_tasks_config
     mt_cfg = get_max_tasks_config(hc_home, team)
     if mt_cfg["enabled"]:
         queued_count = count_tasks_by_status(hc_home, team, QUEUED_STATUSES)
