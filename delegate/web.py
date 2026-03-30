@@ -39,7 +39,9 @@ import os
 import shutil
 import signal as signal_mod
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,6 +85,61 @@ async def _run_in_db_pool(fn, *args, **kwargs):
     """Run *fn(*args, **kwargs)* in the dedicated DB/IO thread pool."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_db_pool, functools.partial(fn, *args, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# Process pool for CPU / subprocess-heavy merge work.
+#
+# merge_once() is fully synchronous, takes only picklable args (Path, str),
+# and returns picklable results (list[MergeResult]).  Running it in a
+# ProcessPoolExecutor moves git rebase, test execution, and merge operations
+# off the main process — bypassing the GIL and freeing the event loop core.
+#
+# The pool is created lazily during the lifespan (not at import time) to
+# avoid spawning workers when the daemon is not enabled (e.g. tests).
+# ---------------------------------------------------------------------------
+_merge_pool: ProcessPoolExecutor | None = None
+
+
+def _init_merge_worker():
+    """Configure logging in merge worker processes.
+
+    forkserver children get a fresh interpreter with default (WARNING-only)
+    logging.  This sets up INFO-level output so merge diagnostics are visible.
+    """
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(name)s %(levelname)s %(message)s",
+    )
+
+
+def _create_merge_pool() -> ProcessPoolExecutor:
+    """Create a new merge ProcessPoolExecutor."""
+    return ProcessPoolExecutor(
+        max_workers=min(4, os.cpu_count() or 4),
+        mp_context=multiprocessing.get_context("forkserver"),
+        initializer=_init_merge_worker,
+    )
+
+
+async def _run_in_merge_pool(fn, *args, **kwargs):
+    """Run *fn* in the process pool for CPU/subprocess-heavy merge work.
+
+    Falls back to ``_run_in_db_pool`` if the merge pool is not initialised
+    (e.g. daemon not enabled, tests running without lifespan).
+    """
+    global _merge_pool
+    pool = _merge_pool
+    if pool is None:
+        return await _run_in_db_pool(fn, *args, **kwargs)
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(pool, functools.partial(fn, *args, **kwargs))
+    except BrokenProcessPool:
+        logger.error("Merge process pool crashed — recreating")
+        _merge_pool = _create_merge_pool()
+        raise  # Let the caller's except handle the current failure
 
 
 # ---------------------------------------------------------------------------
@@ -968,7 +1025,7 @@ async def _daemon_loop(
                         except Exception:
                             logger.debug("auto_approve_once error for %s", t, exc_info=True)
 
-                    results = await _run_in_db_pool(merge_once, hc_home, t)
+                    results = await _run_in_merge_pool(merge_once, hc_home, t)
                     for mr in results:
                         if mr.success:
                             logger.info("Merged %s in %s: %s", mr.task_id, t, mr.message)
@@ -1207,6 +1264,11 @@ async def _lifespan(app: FastAPI):
         global _exchange
         _exchange = exchange
 
+        # Process pool for merge operations — runs git rebase, tests, and
+        # merges in separate OS processes, bypassing the GIL.
+        global _merge_pool
+        _merge_pool = _create_merge_pool()
+
         # Reconcile project_map.json with the DB projects table.
         # If either source is incomplete (e.g. after a partial nuke),
         # this ensures both are in sync so resolve_team_uuid() and
@@ -1345,6 +1407,13 @@ async def _lifespan(app: FastAPI):
             except Exception:
                 logger.exception("Error closing Telephone conversations")
             _exchange = None
+
+        # Shut down the merge process pool — running merges complete,
+        # queued merges are cancelled (they retry on next daemon start).
+        if _merge_pool is not None:
+            logger.info("Shutting down merge process pool...")
+            _merge_pool.shutdown(wait=True, cancel_futures=True)
+            _merge_pool = None
 
     # Clean up PID file (background daemon may exit without going through
     # stop_daemon — e.g. port conflict, crash, OS signal).
