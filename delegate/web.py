@@ -634,6 +634,24 @@ _active_agent_tasks: dict[tuple[str, str], asyncio.Task] = {}
 _active_merge_tasks: set[asyncio.Task] = set()
 _shutdown_flag: bool = False
 _exchange = None  # TelephoneExchange; set during lifespan
+_daemon_wakeup: asyncio.Event | None = None  # Set during lifespan
+
+
+def _wake_daemon():
+    """Thread-safe daemon wakeup — safe to call from sync HTTP handlers.
+
+    Uses ``call_soon_threadsafe`` because FastAPI sync endpoints run in
+    uvicorn's thread pool, not on the event loop thread.
+    """
+    evt = _daemon_wakeup
+    if evt is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_soon_threadsafe(evt.set)
+    except RuntimeError:
+        pass  # No running loop (tests, shutdown)
+
 
 def _ensure_task_infra(
     hc_home: Path,
@@ -1120,7 +1138,18 @@ async def _daemon_loop(
             raise
         except Exception:
             logger.exception("Error during daemon cycle")
-        await asyncio.sleep(interval)
+
+        # Wait for either a wakeup signal (new message sent) or the poll
+        # interval to elapse.  clear() before wait() ensures signals
+        # arriving between wakeup and the next wait are not lost.
+        if _daemon_wakeup is not None:
+            _daemon_wakeup.clear()
+            try:
+                await asyncio.wait_for(_daemon_wakeup.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(interval)
 
 
 def _find_frontend_dir() -> Path | None:
@@ -1269,6 +1298,10 @@ async def _lifespan(app: FastAPI):
         global _merge_pool
         _merge_pool = _create_merge_pool()
 
+        # Event for instant daemon wakeup when messages arrive.
+        global _daemon_wakeup
+        _daemon_wakeup = asyncio.Event()
+
         # Reconcile project_map.json with the DB projects table.
         # If either source is incomplete (e.g. after a partial nuke),
         # this ensures both are in sync so resolve_team_uuid() and
@@ -1352,6 +1385,7 @@ async def _lifespan(app: FastAPI):
         with contextlib.suppress(asyncio.CancelledError):
             await task
         logger.info("Daemon loop stopped")
+        _daemon_wakeup = None
 
         # Cancel all in-flight merge tasks
         if _active_merge_tasks:
@@ -1759,6 +1793,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
             )
         _send(hc_home, team, human_name, msg.recipient, msg.content)
+        _wake_daemon()
         return {"status": "queued"}
 
     @app.post("/teams/{team}/greet")
@@ -3442,6 +3477,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
             )
         _send(hc_home, team, human_name, msg.recipient, msg.content)
+        _wake_daemon()
         return {"status": "queued"}
 
     # --- Agent endpoints (team-scoped) ---
