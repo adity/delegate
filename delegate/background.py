@@ -44,8 +44,10 @@ logger = logging.getLogger(__name__)
 # Maximum number of concurrent background processes per agent.
 MAX_CONCURRENT = 5
 
-# Default tail lines when checking status.
-DEFAULT_TAIL_LINES = 40
+# Default tail lines when checking status.  Keep low to avoid flooding
+# the agent's context with verbose training output.  Agents can override
+# with tail_lines=N when they need more detail.
+DEFAULT_TAIL_LINES = 15
 
 # Maximum runtime in seconds (4 hours).  Processes exceeding this are
 # killed automatically on the next ``check()`` call.

@@ -1216,9 +1216,10 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
 
     @tool(
         "check_background",
-        "Check the status of a background process and get recent output. "
-        "Returns state (running/completed/failed/cancelled/timed_out), "
-        "exit code, elapsed time, and the last N lines of stdout/stderr.",
+        "Check the status of a background process. Returns state "
+        "(running/completed/failed/cancelled/timed_out), exit code, "
+        "elapsed time, and a brief tail of stdout/stderr. "
+        "Prefer grep on the log file for specific metrics over increasing tail_lines.",
         {
             "type": "object",
             "properties": {
@@ -1228,7 +1229,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 },
                 "tail_lines": {
                     "type": "integer",
-                    "description": "Number of lines to return from end of output (default: 40)",
+                    "description": "Lines from end of output (default: 15, keep low to save tokens)",
                 },
             },
             "required": ["handle"],
@@ -1237,7 +1238,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     async def check_background(args: dict) -> dict:
         try:
             import asyncio
-            from delegate.background import check, tail as bg_tail
+            from delegate.background import check, tail as bg_tail, DEFAULT_TAIL_LINES
             from delegate.paths import agent_dir as _agent_dir
 
             ad = _agent_dir(hc_home, team, agent)
@@ -1248,7 +1249,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             if info is None:
                 return _error_result(f"Unknown background process handle: {handle}")
 
-            n = args.get("tail_lines") or 40
+            n = args.get("tail_lines") or DEFAULT_TAIL_LINES
             logs = bg_tail(ad, handle, n=n)
 
             import time

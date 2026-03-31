@@ -605,15 +605,23 @@ def build_user_message(
                 f"\n- Do NOT switch branches — stay on {current_task.get('branch', '')}."
                 "\n- Your branch is local-only and will be merged by the merge worker when approved."
             )
-            parts.append(
-                "\n## Environment setup — MANDATORY FIRST STEP\n"
-                "Before writing ANY code or running ANY command, you MUST:\n"
-                "1. Run: `ls .delegate/setup.sh 2>/dev/null && echo EXISTS || echo MISSING`\n"
-                "2. If EXISTS: source it — `. .delegate/setup.sh`\n"
-                "3. If MISSING: create `.delegate/setup.sh` and `.delegate/premerge.sh` "
-                "following the Environment Setup charter section, commit them, THEN source setup.sh.\n"
-                "Do NOT skip this step. Do NOT proceed to any coding work until the environment is active."
-            )
+            # Only include verbose setup instructions if setup.sh doesn't exist yet.
+            # Once created, the agent knows the pattern — no need to repeat every turn.
+            first_worktree = next(iter(workspace_paths.values()))
+            if not (first_worktree / ".delegate" / "setup.sh").exists():
+                parts.append(
+                    "\n## Environment setup — MANDATORY FIRST STEP\n"
+                    "Before writing ANY code or running ANY command, you MUST:\n"
+                    "1. Run: `ls .delegate/setup.sh 2>/dev/null && echo EXISTS || echo MISSING`\n"
+                    "2. If EXISTS: source it — `. .delegate/setup.sh`\n"
+                    "3. If MISSING: create `.delegate/setup.sh` and `.delegate/premerge.sh` "
+                    "following the Environment Setup charter section, commit them, THEN source setup.sh.\n"
+                    "Do NOT skip this step. Do NOT proceed to any coding work until the environment is active."
+                )
+            else:
+                parts.append(
+                    "\nEnvironment: source `.delegate/setup.sh` before running commands."
+                )
 
         # Task activity — status/assignee transitions, comments, events
         try:

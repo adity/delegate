@@ -1263,16 +1263,24 @@ async def run_turn(
     # dispatches another turn automatically.  If the human paused the
     # task mid-turn, send a wrap-up message instead so the researcher
     # documents progress before going idle.
+    #
+    # If background processes are running, defer the continuation until
+    # they complete — avoids expensive poll turns where the researcher
+    # rebuilds the full prompt just to call check_background.
     if (
         role == "researcher"
         and current_task_id is not None
         and not error_occurred
     ):
         try:
-            await _to_db(
+            disposition = await _to_db(
                 _auto_continue_researcher,
                 hc_home, team, agent, current_task_id, alog,
             )
+            if disposition == "deferred":
+                _schedule_deferred_bg_check(
+                    hc_home, team, agent, current_task_id, alog,
+                )
         except Exception:
             logger.debug(
                 "Researcher auto-continue check failed for %s/%s",
@@ -1304,6 +1312,15 @@ _CONTINUE_MSG = (
     "Do NOT ask for permission — keep going."
 )
 
+_BG_DONE_MSG = (
+    "SYSTEM: Auto-continue — background process(es) finished since your "
+    "last turn.  Review the results and continue your experiment loop.\n\n"
+    "{summary}"
+)
+
+# How often to check if deferred background processes have completed (seconds).
+_BG_POLL_INTERVAL = 30
+
 _WRAP_UP_MSG = (
     "SYSTEM: The human has paused this research task.  "
     "Before you stop, you MUST document your progress:\n\n"
@@ -1325,18 +1342,23 @@ def _auto_continue_researcher(
     agent: str,
     task_id: int,
     alog: AgentLogger,
-) -> None:
+) -> str:
     """Inject a continuation or wrap-up message for a researcher.
 
     Called after a successful researcher turn.  Re-reads the task
     status from the DB (it may have been changed by the human or
     manager during the turn) and decides:
 
-    * ``researching`` → inject a continuation message so the daemon
-      dispatches another turn automatically.
-    * ``paused`` → inject a wrap-up message so the researcher
-      documents results before going idle.
-    * anything else → do nothing (task is done/cancelled/etc.).
+    * ``researching`` with **no** running background processes →
+      inject continuation immediately (``"sent"``).
+    * ``researching`` with running background processes →
+      **defer** continuation until processes complete (``"deferred"``).
+      This avoids expensive poll turns where the researcher just calls
+      ``check_background`` and waits.
+    * ``paused`` → inject a wrap-up message (``"sent"``).
+    * anything else → do nothing (``"skip"``).
+
+    Returns ``"sent"``, ``"deferred"``, or ``"skip"``.
     """
     from delegate.task import get_task as _get_task
     from delegate.mailbox import send as _mailbox_send
@@ -1345,11 +1367,26 @@ def _auto_continue_researcher(
     try:
         task = _get_task(hc_home, team, task_id)
     except Exception:
-        return  # task deleted or inaccessible — nothing to do
+        return "skip"  # task deleted or inaccessible — nothing to do
 
     status = task.get("status", "")
 
     if status == "researching":
+        # Check for running background processes — if any are still going,
+        # defer the continuation so we don't waste a full prompt turn on
+        # a check_background poll.
+        from delegate.background import list_active
+        from delegate.paths import agent_dir as _agent_dir
+        ad = _agent_dir(hc_home, team, agent)
+        active = list_active(ad)
+        if active:
+            labels = ", ".join(p.label or p.handle[:8] for p in active)
+            alog.info(
+                "Deferring auto-continue for %s — %d background process(es) running: %s",
+                format_task_id(task_id), len(active), labels,
+            )
+            return "deferred"
+
         _mailbox_send(
             hc_home, team,
             sender=SYSTEM_USER,
@@ -1358,6 +1395,7 @@ def _auto_continue_researcher(
             task_id=task_id,
         )
         alog.info("Auto-continue injected for task %s", format_task_id(task_id))
+        return "sent"
 
     elif status == "paused":
         _mailbox_send(
@@ -1368,3 +1406,112 @@ def _auto_continue_researcher(
             task_id=task_id,
         )
         alog.info("Wrap-up message injected for paused task %s", format_task_id(task_id))
+        return "sent"
+
+    return "skip"
+
+
+def _deferred_bg_check(
+    hc_home: Path,
+    team: str,
+    agent: str,
+    task_id: int,
+    alog: AgentLogger,
+) -> None:
+    """Check if background processes have completed; if so, inject continuation.
+
+    Called on a timer after ``_auto_continue_researcher`` returned ``"deferred"``.
+    If processes are still running, reschedules itself.  If all are done,
+    sends a continuation message with a summary of completed processes.
+    """
+    from delegate.task import get_task as _get_task
+    from delegate.background import list_active, list_all
+    from delegate.mailbox import send as _mailbox_send
+    from delegate.config import SYSTEM_USER
+    from delegate.paths import agent_dir as _agent_dir
+
+    # Re-check task status (may have been paused/cancelled while waiting)
+    try:
+        task = _get_task(hc_home, team, task_id)
+    except Exception:
+        return
+    status = task.get("status", "")
+    if status not in ("researching", "paused"):
+        return  # task moved to terminal state — stop checking
+
+    if status == "paused":
+        _mailbox_send(
+            hc_home, team,
+            sender=SYSTEM_USER,
+            recipient=agent,
+            message=_WRAP_UP_MSG,
+            task_id=task_id,
+        )
+        alog.info("Wrap-up message injected (deferred) for paused task %s", format_task_id(task_id))
+        return
+
+    ad = _agent_dir(hc_home, team, agent)
+    active = list_active(ad)
+    if active:
+        # Still running — reschedule
+        labels = ", ".join(p.label or p.handle[:8] for p in active)
+        alog.debug(
+            "Background processes still running for %s: %s — rechecking in %ds",
+            format_task_id(task_id), labels, _BG_POLL_INTERVAL,
+        )
+        _schedule_deferred_bg_check(hc_home, team, agent, task_id, alog)
+        return
+
+    # All done — build summary of recently completed processes
+    all_procs = list_all(ad)
+    recently_done = [
+        p for p in all_procs
+        if p.state in ("completed", "failed", "timed_out")
+        and p.ended_at is not None
+    ]
+    # Only include processes that ended in the last 10 minutes
+    import time as _time
+    cutoff = _time.time() - 600
+    recent = [p for p in recently_done if p.ended_at > cutoff]
+
+    summary_parts = []
+    for p in recent[-5:]:  # last 5
+        status_str = f"{p.state} (exit {p.exit_code})" if p.exit_code is not None else p.state
+        summary_parts.append(f"- [{p.label or p.handle[:8]}] {status_str}")
+
+    summary = "\n".join(summary_parts) if summary_parts else "Background processes completed."
+    msg = _BG_DONE_MSG.format(summary=summary)
+
+    _mailbox_send(
+        hc_home, team,
+        sender=SYSTEM_USER,
+        recipient=agent,
+        message=msg,
+        task_id=task_id,
+    )
+    alog.info(
+        "Deferred auto-continue injected for %s — %d process(es) completed",
+        format_task_id(task_id), len(recent),
+    )
+
+
+def _schedule_deferred_bg_check(
+    hc_home: Path,
+    team: str,
+    agent: str,
+    task_id: int,
+    alog: AgentLogger,
+) -> None:
+    """Schedule a deferred background process check on the event loop."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return  # no event loop — can't schedule
+
+    def _run_check():
+        try:
+            _deferred_bg_check(hc_home, team, agent, task_id, alog)
+        except Exception:
+            logger.debug("Deferred bg check failed for %s/%s", team, agent, exc_info=True)
+
+    loop.call_later(_BG_POLL_INTERVAL, _run_check)
