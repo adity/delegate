@@ -24,6 +24,7 @@ Commands:
     delegate nuke                                    — destroy all delegate state (requires confirmation)
 """
 
+import os
 import platform
 import subprocess
 import sys
@@ -112,6 +113,7 @@ def _open_ui(url: str, port: int) -> None:
 )
 @click.option("--dev", is_flag=True, help="Enable dev mode (esbuild watcher for live frontend rebuilds).")
 @click.option("--skip-auth-check", is_flag=True, help="Skip Claude CLI/API key checks (useful for enterprise auth setups).")
+@click.option("--host", type=str, default="127.0.0.1", help="Bind address (default: 127.0.0.1). Use 0.0.0.0 for network access.")
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -123,6 +125,7 @@ def start(
     env_file: Path | None,
     dev: bool,
     skip_auth_check: bool,
+    host: str,
 ) -> None:
     """Start delegate (web UI + agent orchestration)."""
     import time
@@ -194,6 +197,7 @@ def start(
             token_budget=token_budget,
             foreground=True,
             dev=dev,
+            host=host,
         )
     else:
         result_pid = start_daemon(
@@ -204,6 +208,7 @@ def start(
             token_budget=token_budget,
             foreground=False,
             dev=dev,
+            host=host,
         )
         if result_pid:
             success(f"Delegate started (PID {result_pid})")
@@ -1444,6 +1449,51 @@ def agent_nudge(ctx: click.Context, team: str, name: str, message: str | None) -
     success(f"Nudged agent '{name}' on team '{team}'")
     if active_tasks:
         info(f"  {len(active_tasks)} active task(s) mentioned in nudge")
+
+
+@agent.command("restart-all")
+@click.argument("team", required=False, default=None)
+@click.option("--port", type=int, default=None, help="Delegate port (default: auto-detect from env).")
+@click.pass_context
+def agent_restart_all(ctx: click.Context, team: str | None, port: int | None) -> None:
+    """Restart all agent sessions (kill subprocesses, clear caches).
+
+    Useful after a usage-limit reset when agents are stuck on API errors.
+    Cancels in-flight turns, closes all cached Telephone sessions, and
+    wakes the daemon to re-dispatch agents with unread messages.
+
+    TEAM is optional — if omitted, restarts agents across all teams.
+    """
+    import urllib.request
+    import urllib.error
+    from delegate.daemon import is_running
+    from delegate.fmt import success, error, info
+
+    hc_home = _get_home(ctx)
+    alive, _ = is_running(hc_home)
+    if not alive:
+        error("Delegate is not running")
+        raise SystemExit(1)
+
+    p = port or int(os.environ.get("DELEGATE_PORT", DEFAULT_PORT))
+    url = f"http://127.0.0.1:{p}/api/agents/restart-all"
+    if team:
+        url += f"?team={team}"
+
+    try:
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            import json
+            data = json.loads(resp.read())
+        success(
+            f"Restarted: {data['turns_cancelled']} turn(s) cancelled, "
+            f"{data['telephones_closed']} session(s) closed"
+        )
+        info(f"  Teams: {', '.join(data.get('teams', []))}")
+        info("  Daemon will re-dispatch agents with unread messages on next cycle")
+    except urllib.error.URLError as exc:
+        error(f"Could not reach delegate at port {p}: {exc}")
+        raise SystemExit(1)
 
 
 # ──────────────────────────────────────────────────────────────

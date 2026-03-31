@@ -104,6 +104,7 @@ def start_daemon(
     token_budget: int | None = None,
     foreground: bool = False,
     dev: bool = False,
+    host: str = "127.0.0.1",
 ) -> int | None:
     """Start the daemon.
 
@@ -142,11 +143,23 @@ def start_daemon(
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            s.bind(("0.0.0.0", port))
+            s.bind((host, port))
         except OSError:
             raise RuntimeError(
                 f"Port {port} is already in use. "
                 f"Stop the other process or use --port to pick a different port."
+            )
+
+    # Warn if binding to a non-loopback address without authentication
+    if host != "127.0.0.1" and host != "localhost":
+        from delegate.auth import is_passphrase_enabled
+        if not is_passphrase_enabled(hc_home):
+            logger.warning(
+                "SECURITY WARNING: Binding to %s without a passphrase. "
+                "All endpoints (including shell exec) are unauthenticated. "
+                "Run 'delegate auth set-passphrase' to secure the API, "
+                "or use --host 127.0.0.1 to restrict to localhost.",
+                host,
             )
 
     # Set environment variables for the web app
@@ -177,7 +190,7 @@ def start_daemon(
             uvicorn.run(
                 "delegate.web:create_app",
                 factory=True,
-                host="0.0.0.0",
+                host=host,
                 port=port,
                 log_level="info",
                 timeout_graceful_shutdown=15,
@@ -194,7 +207,7 @@ def start_daemon(
         sys.executable, "-m", "uvicorn",
         "delegate.web:create_app",
         "--factory",
-        "--host", "0.0.0.0",
+        "--host", host,
         "--port", str(port),
         "--log-level", "info",
     ]

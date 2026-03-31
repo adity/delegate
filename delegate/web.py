@@ -1503,6 +1503,21 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     app = FastAPI(title="Delegate UI", lifespan=_lifespan)
     app.state.hc_home = hc_home
 
+    # CORS — restrict to localhost origins by default.
+    from fastapi.middleware.cors import CORSMiddleware
+    port = int(os.environ.get("DELEGATE_PORT", "3548"))
+    cors_origins = [
+        f"http://localhost:{port}",
+        f"http://127.0.0.1:{port}",
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # --- Config endpoint ---
 
     @app.get("/config")
@@ -3671,6 +3686,64 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         from delegate.activity import get_recent
         return get_recent(team, name, n=n)
 
+    @app.post("/api/agents/restart-all")
+    async def restart_all_agents(team: str | None = None):
+        """Restart all agent Telephone sessions across all (or one) team.
+
+        Cancels every in-flight agent turn, closes and removes every
+        cached Telephone (killing the Claude subprocess), and clears the
+        in-flight tracking set.  The daemon loop will re-dispatch agents
+        with unread messages on the next cycle, creating fresh Telephone
+        sessions.
+
+        Use this after a usage-limit reset to unstick agents whose
+        cached Telephones are wedged on API errors.
+        """
+        from delegate.activity import broadcast_turn_event
+
+        teams = [team] if team else _list_teams(hc_home)
+        cancelled = 0
+        closed = 0
+
+        # 1. Cancel all active agent asyncio tasks
+        for key, task in list(_active_agent_tasks.items()):
+            agent_team, agent_name = key
+            if team and agent_team != team:
+                continue
+            if not task.done():
+                task.cancel()
+                cancelled += 1
+                broadcast_turn_event(
+                    "turn_interrupted", agent_name, team=agent_team,
+                )
+
+        # 2. Close and remove all cached Telephones (kills subprocesses)
+        if _exchange is not None:
+            for (t, a), tel in list(_exchange._telephones.items()):
+                if team and t != team:
+                    continue
+                try:
+                    await tel.close()
+                except Exception:
+                    logger.debug("Error closing telephone %s/%s", t, a, exc_info=True)
+                _exchange._telephones.pop((t, a), None)
+                closed += 1
+
+        # 3. Wake the daemon so it re-dispatches immediately
+        if _daemon_wakeup is not None:
+            _daemon_wakeup.set()
+
+        logger.info(
+            "restart-all: cancelled %d turns, closed %d telephones (team=%s)",
+            cancelled, closed, team or "all",
+        )
+        return {
+            "status": "restarted",
+            "turns_cancelled": cancelled,
+            "telephones_closed": closed,
+            "teams": teams,
+        }
+
     @app.post("/api/agents/{agent}/interrupt")
     async def interrupt_agent(agent: str, team: str | None = None):
         """Interrupt an agent's current turn and reset its conversation.
@@ -3902,20 +3975,45 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     def _resolve_file_path(team: str, path: str) -> Path:
         """Resolve a file path from an API ``path`` parameter.
 
-        Paths starting with ``/`` are treated as absolute and used directly.
-        Paths starting with ``~`` are expanded via the home directory.
-        Other paths are resolved relative to ``hc_home`` for backward
-        compatibility with older stored paths.
+        Absolute and ``~``-prefixed paths are allowed only if they fall
+        within the delegate home directory or registered repo directories.
+        Other paths are resolved relative to ``hc_home``.
 
-        Returns the resolved ``Path``, or raises 404.
+        Returns the resolved ``Path``, or raises 403/404.
         """
         if path.startswith("/"):
             target = Path(path).resolve()
         elif path.startswith("~"):
             target = Path(path).expanduser().resolve()
         else:
-            # Backward compat: resolve delegate-relative paths from hc_home
             target = (hc_home / path).resolve()
+
+        # Build allowed roots: hc_home + all registered repo paths
+        hc_resolved = hc_home.resolve()
+        allowed_roots = [hc_resolved]
+        try:
+            from delegate.repo import list_repos, get_repo_path
+            for repo_name in list_repos(hc_home, team):
+                rp = get_repo_path(hc_home, team, repo_name)
+                if rp.exists():
+                    allowed_roots.append(rp.resolve())
+        except Exception:
+            pass
+
+        # Also allow worktree directories (they may be outside hc_home)
+        try:
+            from delegate.paths import task_worktree_dir
+            wt_base = task_worktree_dir(hc_home, team).resolve()
+            allowed_roots.append(wt_base)
+        except Exception:
+            pass
+
+        target_str = str(target)
+        if not any(target_str.startswith(str(root)) for root in allowed_roots):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: path is outside the project directory",
+            )
 
         if not target.exists():
             raise HTTPException(
@@ -4482,11 +4580,13 @@ button:hover{background:#3a8eef}
         if verify_passphrase(hc_home, passphrase):
             cookie = create_session_cookie(hc_home)
             response = RedirectResponse(url="/", status_code=302)
+            is_dev = os.environ.get("DELEGATE_DEV") == "1"
             response.set_cookie(
                 key="delegate_session",
                 value=cookie,
                 httponly=True,
                 samesite="lax",
+                secure=not is_dev,
                 max_age=7 * 24 * 3600,
             )
             return response

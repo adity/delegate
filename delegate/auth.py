@@ -112,11 +112,13 @@ _COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 days
 
 
 def set_passphrase(hc_home: Path, passphrase: str) -> None:
-    """Store a passphrase hash in config.yaml."""
+    """Store a passphrase hash in config.yaml using argon2id."""
+    from argon2 import PasswordHasher
     from delegate.config import _read, _write
 
+    ph = PasswordHasher()
     data = _read(hc_home)
-    data["passphrase_hash"] = hashlib.sha256(passphrase.encode()).hexdigest()
+    data["passphrase_hash"] = ph.hash(passphrase)
     # Generate a signing key for session cookies
     if "session_secret" not in data:
         data["session_secret"] = secrets.token_hex(32)
@@ -141,15 +143,37 @@ def is_passphrase_enabled(hc_home: Path) -> bool:
 
 
 def verify_passphrase(hc_home: Path, passphrase: str) -> bool:
-    """Verify a passphrase against the stored hash."""
+    """Verify a passphrase against the stored hash.
+
+    Supports both argon2id (preferred) and legacy SHA-256 hashes.
+    If a legacy SHA-256 hash is verified successfully, it is automatically
+    upgraded to argon2id in place.
+    """
     from delegate.config import _read
 
     data = _read(hc_home)
     stored_hash = data.get("passphrase_hash")
     if not stored_hash:
         return False
+
+    # Argon2 hashes start with "$argon2"
+    if stored_hash.startswith("$argon2"):
+        from argon2 import PasswordHasher
+        from argon2.exceptions import VerifyMismatchError
+        ph = PasswordHasher()
+        try:
+            return ph.verify(stored_hash, passphrase)
+        except VerifyMismatchError:
+            return False
+
+    # Legacy: SHA-256 hex digest (64 chars)
     candidate = hashlib.sha256(passphrase.encode()).hexdigest()
-    return hmac.compare_digest(stored_hash, candidate)
+    if hmac.compare_digest(stored_hash, candidate):
+        # Auto-upgrade to argon2id on successful verification
+        set_passphrase(hc_home, passphrase)
+        logger.info("Upgraded passphrase hash from SHA-256 to argon2id")
+        return True
+    return False
 
 
 def _get_session_secret(hc_home: Path) -> str:
