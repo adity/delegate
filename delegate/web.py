@@ -676,9 +676,27 @@ def _ensure_task_infra(
     filesystem checks on every poll cycle.  It is cleared when a task
     transitions to ``done`` or ``cancelled``.
     """
-    from delegate.repo import create_task_worktree, get_task_worktree_path, BranchExistsError
+    from delegate.repo import (
+        create_task_worktree,
+        get_task_worktree_path,
+        BranchExistsError,
+        ensure_default_branch_checked_out,
+        get_repo_path,
+        list_repos,
+    )
     from delegate.task import _all_deps_resolved
     from delegate.env import write_env_scripts
+
+    # Self-heal: verify all registered repos have their default branch
+    # checked out in the main working copy.  This prevents cascading
+    # failures if a delegate branch was accidentally left checked out.
+    for repo_name in list_repos(hc_home, team):
+        try:
+            repo_dir = get_repo_path(hc_home, team, repo_name).resolve()
+            if repo_dir.is_dir():
+                ensure_default_branch_checked_out(repo_dir)
+        except Exception:
+            pass  # best-effort; don't block infra setup
 
     # Active statuses that need worktrees
     active_statuses = ("todo", "in_progress")

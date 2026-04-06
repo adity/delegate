@@ -690,6 +690,20 @@ def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_
         # Legacy validation
         _legacy_validate_transition(current, status)
 
+    # ── Warn if task reaches merge-eligible status without a repo ──
+    _merge_statuses = ("in_review", "in_approval", "merging")
+    if status in _merge_statuses:
+        repos: list[str] = old_task.get("repo", [])
+        branch: str = old_task.get("branch", "")
+        if not repos or not branch:
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "%s: transitioning to %s without repo/branch — "
+                "merge pipeline will not be able to land this task. "
+                "Was it created without --repo?",
+                format_task_id(task_id), status,
+            )
+
     # ── Hard enforcement of max-tasks in-progress limit ──
     from delegate.config import get_max_tasks_config
     if status in IN_PROGRESS_STATUSES and current not in IN_PROGRESS_STATUSES:

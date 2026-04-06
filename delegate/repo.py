@@ -70,6 +70,84 @@ def get_default_branch(repo_dir: str | Path) -> str:
     return "main"
 
 
+def ensure_default_branch_checked_out(repo_dir: str | Path) -> bool:
+    """Verify the main repo has its default branch checked out.
+
+    If a delegate/worktree branch is accidentally checked out in the
+    main repo (e.g. due to partial cleanup or agent error), reset it
+    to the default branch.  This is a defensive self-healing measure.
+
+    Returns True if a correction was made, False if already correct.
+    """
+    repo_dir = str(Path(repo_dir).resolve())
+    db = get_default_branch(repo_dir)
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return False
+
+    current = result.stdout.strip()
+    if current == db or current == "HEAD":
+        # Already on default branch (or detached HEAD — leave alone)
+        return False
+
+    # Only auto-reset delegate-managed branches.  If the user has their
+    # own branch checked out (e.g. feature/xyz), leave it alone — the
+    # ff-merge code handles this via update-ref without touching the
+    # working tree.  We only fix the case where a delegate worktree
+    # branch leaked into the main repo's HEAD.
+    if not current.startswith("delegate/") and not current.startswith("_merge/"):
+        return False
+
+    # Wrong branch — check it's not a bare repo or in a rebase
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if status.returncode != 0:
+        return False
+
+    dirty = status.stdout.strip()
+    if dirty:
+        logger.warning(
+            "Main repo %s is on branch %r (not %s) with uncommitted "
+            "changes — skipping auto-reset to avoid data loss",
+            repo_dir, current, db,
+        )
+        return False
+
+    logger.warning(
+        "Main repo %s has branch %r checked out instead of %s — "
+        "resetting to %s (self-healing)",
+        repo_dir, current, db, db,
+    )
+    checkout = subprocess.run(
+        ["git", "checkout", db],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if checkout.returncode != 0:
+        logger.error(
+            "Failed to reset %s to %s: %s",
+            repo_dir, db, checkout.stderr.strip(),
+        )
+        return False
+
+    logger.info("Self-healed: %s now on %s (was %s)", repo_dir, db, current)
+    return True
+
+
 def _derive_name(source: str) -> str:
     """Derive a repo name from a local path.
 
@@ -391,12 +469,24 @@ def create_task_worktree(
             f"git -C {real_repo} worktree add {wt_path} {branch}"
         )
 
-    subprocess.run(
-        ["git", "worktree", "add", str(wt_path), "-b", branch, default_branch],
-        cwd=str(real_repo),
-        capture_output=True,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", str(wt_path), "-b", branch, default_branch],
+            cwd=str(real_repo),
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        # If worktree creation failed, the branch may have been created
+        # but the directory not set up.  Clean up the orphaned branch to
+        # prevent BranchExistsError on the next retry.
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=str(real_repo),
+            capture_output=True,
+            check=False,
+        )
+        raise
 
     logger.info("Created worktree at %s (branch: %s)", wt_path, branch)
 

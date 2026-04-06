@@ -71,7 +71,12 @@ from delegate.task import (
 )
 from delegate.chat import log_event
 from delegate.paths import team_dir as _team_dir
-from delegate.repo import get_repo_path, get_default_branch, remove_task_worktree
+from delegate.repo import (
+    get_repo_path,
+    get_default_branch,
+    remove_task_worktree,
+    ensure_default_branch_checked_out,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -951,6 +956,10 @@ def merge_task(
         repo_str = repo_dirs[repo_name]
         rebased_tip = rebased_tips[repo_name]
 
+        # Self-heal: if the main repo has a delegate branch checked out
+        # (instead of main), reset it before attempting the ff-merge.
+        ensure_default_branch_checked_out(repo_str)
+
         pre_merge = _run_git(["rev-parse", get_default_branch(repo_str)], cwd=repo_str)
         merge_base_dict[repo_name] = pre_merge.stdout.strip() if pre_merge.returncode == 0 else ""
 
@@ -1218,6 +1227,21 @@ def merge_once(
         repos: list[str] = task.get("repo", [])
 
         if not repos:
+            # Task reached in_approval without a repo — cannot merge.
+            # Log a visible warning and notify the manager so this
+            # doesn't sit in in_approval indefinitely (root cause of
+            # TRAD-0024/TRAD-0025 silent failures).
+            logger.warning(
+                "%s: task in_approval has no repo — cannot merge; "
+                "was the task created without --repo?",
+                format_task_id(task_id),
+            )
+            log_event(
+                hc_home, team,
+                f"{format_task_id(task_id)} cannot merge — no repo "
+                f"associated with this task. Recreate with --repo.",
+                task_id=task_id,
+            )
             continue
 
         merge_policy = get_merge_policy(hc_home, team, repos[0])
