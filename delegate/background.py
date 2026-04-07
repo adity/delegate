@@ -54,6 +54,16 @@ DEFAULT_TAIL_LINES = 15
 DEFAULT_MAX_RUNTIME = 4 * 3600
 
 
+# File/env-var names for the experiment output contract.
+_SUMMARY_FILENAME = "summary.txt"
+_SUCCESS_FLAG_FILENAME = "run.success"
+ENV_SUMMARY_FILE = "DELEGATE_SUMMARY_FILE"
+ENV_SUCCESS_FLAG = "DELEGATE_SUCCESS_FLAG"
+
+# Maximum bytes to read from the summary file (guard against runaway writes).
+_MAX_SUMMARY_BYTES = 64 * 1024
+
+
 @dataclass
 class ProcessInfo:
     """Metadata for a background process."""
@@ -97,6 +107,14 @@ def _stderr_path(agent_dir: Path, handle: str) -> Path:
 def _exitcode_path(agent_dir: Path, handle: str) -> Path:
     """Sentinel file written by the wrapper script on process exit."""
     return _proc_dir(agent_dir, handle) / "exitcode"
+
+
+def _summary_path(agent_dir: Path, handle: str) -> Path:
+    return _proc_dir(agent_dir, handle) / _SUMMARY_FILENAME
+
+
+def _success_flag_path(agent_dir: Path, handle: str) -> Path:
+    return _proc_dir(agent_dir, handle) / _SUCCESS_FLAG_FILENAME
 
 
 def _save_meta(agent_dir: Path, info: ProcessInfo) -> None:
@@ -168,6 +186,9 @@ def launch(
     merged_env = dict(os.environ)
     if env:
         merged_env.update(env)
+    # Expose paths so experiment scripts can write structured output.
+    merged_env[ENV_SUMMARY_FILE] = str(_summary_path(agent_dir, handle))
+    merged_env[ENV_SUCCESS_FLAG] = str(_success_flag_path(agent_dir, handle))
 
     proc = subprocess.Popen(
         ["sh", "-c", wrapper],
@@ -323,6 +344,29 @@ def list_all(agent_dir: Path) -> list[ProcessInfo]:
             if info is not None:
                 result.append(info)
     return result
+
+
+def read_summary(agent_dir: Path, handle: str) -> dict[str, str | bool]:
+    """Read the experiment summary and success flag for a completed process.
+
+    Returns a dict with:
+      - ``summary``: contents of summary.txt (empty string if absent)
+      - ``succeeded``: True if run.success flag exists
+    """
+    s_path = _summary_path(agent_dir, handle)
+    f_path = _success_flag_path(agent_dir, handle)
+    summary = ""
+    try:
+        raw = s_path.read_bytes()[:_MAX_SUMMARY_BYTES]
+        summary = raw.decode(errors="replace").strip()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        summary = "(error reading summary)"
+    return {
+        "summary": summary,
+        "succeeded": f_path.exists(),
+    }
 
 
 # ---------------------------------------------------------------------------

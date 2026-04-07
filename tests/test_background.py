@@ -13,6 +13,7 @@ from delegate.background import (
     cancel,
     list_active,
     list_all,
+    read_summary,
     MAX_CONCURRENT,
 )
 
@@ -169,3 +170,55 @@ class TestList:
     def test_list_empty(self, agent_dir):
         assert list_active(agent_dir) == []
         assert list_all(agent_dir) == []
+
+
+class TestExperimentOutputContract:
+    """Tests for $DELEGATE_SUMMARY_FILE / $DELEGATE_SUCCESS_FLAG env vars."""
+
+    def test_env_vars_set_for_subprocess(self, agent_dir):
+        """Subprocess receives DELEGATE_SUMMARY_FILE and DELEGATE_SUCCESS_FLAG."""
+        info = launch(agent_dir, "env | grep DELEGATE_")
+        time.sleep(0.5)
+        logs = tail(agent_dir, info.handle)
+        assert "DELEGATE_SUMMARY_FILE=" in logs["stdout"]
+        assert "DELEGATE_SUCCESS_FLAG=" in logs["stdout"]
+
+    def test_summary_and_flag_written_by_experiment(self, agent_dir):
+        """Experiment writes summary + flag; read_summary picks them up."""
+        cmd = (
+            'echo \'{"acc": 0.95}\' > "$DELEGATE_SUMMARY_FILE" && '
+            'touch "$DELEGATE_SUCCESS_FLAG"'
+        )
+        info = launch(agent_dir, cmd, label="exp1")
+        time.sleep(0.5)
+        check(agent_dir, info.handle)
+        result = read_summary(agent_dir, info.handle)
+        assert result["succeeded"] is True
+        assert '"acc": 0.95' in result["summary"]
+
+    def test_no_summary_or_flag(self, agent_dir):
+        """Experiment that writes nothing — fallback path."""
+        info = launch(agent_dir, "echo hello")
+        time.sleep(0.5)
+        check(agent_dir, info.handle)
+        result = read_summary(agent_dir, info.handle)
+        assert result["succeeded"] is False
+        assert result["summary"] == ""
+
+    def test_summary_without_flag(self, agent_dir):
+        """Experiment writes summary but no success flag (e.g. metrics regressed)."""
+        cmd = 'echo \'{"loss": 9.99}\' > "$DELEGATE_SUMMARY_FILE"'
+        info = launch(agent_dir, cmd, label="bad_run")
+        time.sleep(0.5)
+        check(agent_dir, info.handle)
+        result = read_summary(agent_dir, info.handle)
+        assert result["succeeded"] is False
+        assert '"loss": 9.99' in result["summary"]
+
+    def test_summary_paths_derived_from_handle(self, agent_dir):
+        """Summary/flag paths are derived from handle, not stored on ProcessInfo."""
+        from delegate.background import _summary_path, _success_flag_path
+        info = launch(agent_dir, "true")
+        assert str(_summary_path(agent_dir, info.handle)).endswith("summary.txt")
+        assert str(_success_flag_path(agent_dir, info.handle)).endswith("run.success")
+        assert info.handle in str(_summary_path(agent_dir, info.handle))

@@ -1425,7 +1425,7 @@ def _deferred_bg_check(
     sends a continuation message with a summary of completed processes.
     """
     from delegate.task import get_task as _get_task
-    from delegate.background import list_active, list_all
+    from delegate.background import list_all, read_summary, tail as bg_tail
     from delegate.mailbox import send as _mailbox_send
     from delegate.config import SYSTEM_USER
     from delegate.paths import agent_dir as _agent_dir
@@ -1451,9 +1451,11 @@ def _deferred_bg_check(
         return
 
     ad = _agent_dir(hc_home, team, agent)
-    active = list_active(ad)
+    # Single traversal: list_all refreshes running processes and returns
+    # everything, so we can partition into active vs. recently-done.
+    all_procs = list_all(ad)
+    active = [p for p in all_procs if p.state == "running"]
     if active:
-        # Still running — reschedule
         labels = ", ".join(p.label or p.handle[:8] for p in active)
         alog.debug(
             "Background processes still running for %s: %s — rechecking in %ds",
@@ -1462,8 +1464,7 @@ def _deferred_bg_check(
         _schedule_deferred_bg_check(hc_home, team, agent, task_id, alog)
         return
 
-    # All done — build summary of recently completed processes
-    all_procs = list_all(ad)
+    # All done — build summary enriched with experiment output contract files.
     recently_done = [
         p for p in all_procs
         if p.state in ("completed", "failed", "timed_out")
@@ -1477,7 +1478,19 @@ def _deferred_bg_check(
     summary_parts = []
     for p in recent[-5:]:  # last 5
         status_str = f"{p.state} (exit {p.exit_code})" if p.exit_code is not None else p.state
-        summary_parts.append(f"- [{p.label or p.handle[:8]}] {status_str}")
+        exp = read_summary(ad, p.handle)
+        if exp["succeeded"]:
+            status_str = f"SUCCESS (exit {p.exit_code})"
+        header = f"- [{p.label or p.handle[:8]}] {status_str}"
+        if exp["summary"]:
+            header += f"\n  {exp['summary']}"
+        elif p.state == "failed":
+            # No summary file — show brief stderr for debugging.
+            logs = bg_tail(ad, p.handle, n=5)
+            stderr = logs.get("stderr", "").strip()
+            if stderr:
+                header += f"\n  stderr: {stderr}"
+        summary_parts.append(header)
 
     summary = "\n".join(summary_parts) if summary_parts else "Background processes completed."
     msg = _BG_DONE_MSG.format(summary=summary)

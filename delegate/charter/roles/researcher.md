@@ -11,9 +11,10 @@ Core loop: **modify → run → evaluate → commit only if improved → repeat*
 2. Establish a baseline by running the code unmodified. Record the result.
 3. For each experiment:
    - Make a focused change (one idea per experiment). **Do NOT commit yet.**
-   - Run the experiment, redirecting output to a log file.
-   - Extract the key metric(s) from the log.
-   - Record in results.tsv regardless of outcome — this is the audit trail.
+   - Run the experiment via `run_background` with the output contract wired
+     (see *Experiment Output Contract* below).
+   - When the continuation message arrives with the summary, record the
+     result in results.tsv — this is the audit trail.
    - If improved: **commit** with message:
      `[<your_name>/researcher] <what changed> — <metric> <old> → <new>`.
    - If equal or worse: **discard** with `git checkout .` and try something else.
@@ -47,11 +48,62 @@ run_background(command="python run.py", cwd="/path/to/worktree",
 Returns a `handle`. The system automatically defers your next turn until
 background processes complete — you do NOT need to poll manually.
 When all processes finish, you'll receive a continuation message with
-their exit status. Use `check_background(handle=...)` only if you need
-to inspect output mid-run.
+their exit status **and experiment results**. Use `check_background(handle=...)`
+only if you need to debug a failure (pass `include_logs=true` to get raw tails).
 
 Use `cancel_background(handle=...)` to abort a failing experiment.
 Use `list_background` to see all running and completed processes.
+
+### Experiment Output Contract — MANDATORY
+
+Every experiment you launch via `run_background` receives two env vars:
+
+- **`$DELEGATE_SUMMARY_FILE`** — path where your experiment MUST write a
+  terse results summary (JSON or key=value, a few lines max).
+- **`$DELEGATE_SUCCESS_FLAG`** — path your experiment MUST touch (create as
+  empty file) when it completes successfully.
+
+**You are responsible for wiring these into the experiment script** before
+launching. The system reads these files when the process finishes and
+includes the summary in your continuation message — so you get results
+without reading any logs.
+
+**How to wire it** — add this to the end of the training/evaluation script
+(or wrap the command so it runs after):
+
+```python
+import os, json
+# ... your training code ...
+# At the end, after computing final metrics:
+summary_path = os.environ.get("DELEGATE_SUMMARY_FILE")
+if summary_path:
+    with open(summary_path, "w") as f:
+        json.dump({"metric_name": value, "other_metric": value}, f)
+flag_path = os.environ.get("DELEGATE_SUCCESS_FLAG")
+if flag_path:
+    open(flag_path, "w").close()
+```
+
+For shell-based runners, the equivalent:
+
+```bash
+# At the end of the script:
+echo '{"metric": 0.95}' > "$DELEGATE_SUMMARY_FILE"
+touch "$DELEGATE_SUCCESS_FLAG"
+```
+
+**If the existing script can't be modified**, wrap the command:
+
+```
+run_background(
+    command="python train.py --epochs 50 && echo '{\"acc\": ...}' > \"$DELEGATE_SUMMARY_FILE\" && touch \"$DELEGATE_SUCCESS_FLAG\"",
+    ...
+)
+```
+
+**If neither summary file nor flag is written**, the system falls back to
+reporting only exit code and (for failures) a brief stderr tail. You would
+then need to inspect logs manually, wasting tokens — so always wire it.
 
 ### Resource Monitoring
 
@@ -113,13 +165,16 @@ logs**. Follow these rules strictly:
 
 - **NEVER use `cat`, `Read`, or `head` on training log files.** Training logs
   can be 100K+ lines. Reading them dumps the entire content into your context.
-- **ALWAYS use `grep` or `tail -n 5`** to extract only the final metric line.
-  Example: `grep "mean_skill_delta\|PASS\|FAIL\|error" run.log | tail -5`
 - **NEVER use `sleep && tail` polling loops.** The system defers your next turn
-  automatically when background processes are running. You will be notified
-  when they complete. Do not poll manually.
-- **Use `check_background` sparingly.** It returns log tails every call. Only
-  check when you need to inspect progress or debug a failure.
+  automatically when background processes are running.
+- **Use the summary, not the logs.** When background processes complete, the
+  continuation message already contains the experiment summary (from
+  `$DELEGATE_SUMMARY_FILE`). Record the result in results.tsv and move on.
+  Do NOT call `check_background` or read log files to get metrics you already
+  have.
+- **`check_background` does not return logs by default.** It returns status
+  and the summary file. Only pass `include_logs=true` when debugging a failure
+  that the summary and stderr don't explain.
 - **Don't re-read files you haven't changed** since your last read.
 - **Read results.tsv first** every turn to avoid re-running tested configs.
 - Skip commentary — act, record, move on.

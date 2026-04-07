@@ -1153,7 +1153,10 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         "run_background",
         "Launch a long-running command as a background process (e.g. GPU training, "
         "data processing). Returns a handle to check status later. Use this for any "
-        "command expected to run longer than 2 minutes.",
+        "command expected to run longer than 2 minutes. "
+        "The subprocess receives $DELEGATE_SUMMARY_FILE and $DELEGATE_SUCCESS_FLAG "
+        "env vars — your experiment script MUST write a terse results summary to "
+        "$DELEGATE_SUMMARY_FILE and touch $DELEGATE_SUCCESS_FLAG on success.",
         {
             "type": "object",
             "properties": {
@@ -1207,7 +1210,8 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 "label": info.label,
                 "message": (
                     f"Background process started (handle={info.handle}). "
-                    f"Use check_background to monitor progress."
+                    f"Env vars $DELEGATE_SUMMARY_FILE and $DELEGATE_SUCCESS_FLAG "
+                    f"are set for the subprocess."
                 ),
             })
         except Exception as e:
@@ -1216,10 +1220,10 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
 
     @tool(
         "check_background",
-        "Check the status of a background process. Returns state "
-        "(running/completed/failed/cancelled/timed_out), exit code, "
-        "elapsed time, and a brief tail of stdout/stderr. "
-        "Prefer grep on the log file for specific metrics over increasing tail_lines.",
+        "Check the status of a background process. Returns state, exit code, "
+        "elapsed time, and the experiment summary (from $DELEGATE_SUMMARY_FILE). "
+        "Raw log tails are NOT included by default — set include_logs=true to "
+        "get stdout/stderr tails (e.g. for debugging failures).",
         {
             "type": "object",
             "properties": {
@@ -1227,9 +1231,13 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                     "type": "string",
                     "description": "Process handle returned by run_background",
                 },
+                "include_logs": {
+                    "type": "boolean",
+                    "description": "Include raw stdout/stderr tails (default: false, saves tokens)",
+                },
                 "tail_lines": {
                     "type": "integer",
-                    "description": "Lines from end of output (default: 15, keep low to save tokens)",
+                    "description": "Lines of log output when include_logs=true (default: 15)",
                 },
             },
             "required": ["handle"],
@@ -1238,7 +1246,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     async def check_background(args: dict) -> dict:
         try:
             import asyncio
-            from delegate.background import check, tail as bg_tail, DEFAULT_TAIL_LINES
+            from delegate.background import check, tail as bg_tail, read_summary, DEFAULT_TAIL_LINES
             from delegate.paths import agent_dir as _agent_dir
 
             ad = _agent_dir(hc_home, team, agent)
@@ -1249,22 +1257,31 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             if info is None:
                 return _error_result(f"Unknown background process handle: {handle}")
 
-            n = args.get("tail_lines") or DEFAULT_TAIL_LINES
-            logs = bg_tail(ad, handle, n=n)
-
             import time
             elapsed = (info.ended_at or time.time()) - info.started_at
 
-            result = {
+            result: dict = {
                 "handle": info.handle,
                 "state": info.state,
                 "exit_code": info.exit_code,
                 "label": info.label,
                 "elapsed_seconds": round(elapsed, 1),
                 "elapsed_human": _format_duration(elapsed),
-                "stdout_tail": logs.get("stdout", ""),
-                "stderr_tail": logs.get("stderr", ""),
             }
+
+            # Only read summary/flag for terminal processes — they don't
+            # exist yet while the process is still running.
+            if info.state != "running":
+                exp = await asyncio.to_thread(read_summary, ad, handle)
+                result["succeeded"] = exp["succeeded"]
+                result["summary"] = exp["summary"] or "(no summary file written by experiment)"
+
+            if args.get("include_logs"):
+                n = args.get("tail_lines") or DEFAULT_TAIL_LINES
+                logs = await asyncio.to_thread(bg_tail, ad, handle, n)
+                result["stdout_tail"] = logs.get("stdout", "")
+                result["stderr_tail"] = logs.get("stderr", "")
+
             return _json_result(result)
         except Exception as e:
             logger.exception("check_background failed")
