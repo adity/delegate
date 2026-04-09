@@ -378,7 +378,8 @@ class TestRepoGitDirs:
 
     @patch("delegate.runtime.random.random", return_value=1.0)
     def test_create_telephone_includes_git_dirs(self, _mock_rng, tmp_team):
-        """_create_telephone should include repo .git/ paths in add_dirs."""
+        """_create_telephone should include repo .git/ paths in add_dirs
+        when task_repos includes the repo."""
         from delegate.repo import register_repo
         from delegate.runtime import _create_telephone
 
@@ -388,12 +389,34 @@ class TestRepoGitDirs:
                        capture_output=True)
         register_repo(tmp_team, TEAM, str(repo_path), name="myrepo")
 
+        # With task_repos — .git/ should be in add_dirs
         tel = _create_telephone(
             tmp_team, TEAM, "alice", preamble="test preamble",
+            task_repos=["myrepo"],
         )
         expected_git = str((repo_path / ".git").resolve())
         add_dirs_strs = [str(d) for d in tel.add_dirs]
         assert expected_git in add_dirs_strs
+
+    @patch("delegate.runtime.random.random", return_value=1.0)
+    def test_create_telephone_no_git_dirs_without_task_repos(self, _mock_rng, tmp_team):
+        """_create_telephone should NOT include .git/ when task_repos is empty."""
+        from delegate.repo import register_repo
+        from delegate.runtime import _create_telephone
+
+        repo_path = tmp_team / "_test_repos" / "myrepo2"
+        repo_path.mkdir(parents=True)
+        subprocess.run(["git", "init", str(repo_path)], check=True,
+                       capture_output=True)
+        register_repo(tmp_team, TEAM, str(repo_path), name="myrepo2")
+
+        # Without task_repos — no .git/ in add_dirs
+        tel = _create_telephone(
+            tmp_team, TEAM, "alice", preamble="test preamble",
+        )
+        add_dirs_strs = [str(d) for d in tel.add_dirs]
+        git_dirs = [d for d in add_dirs_strs if d.endswith("/.git")]
+        assert git_dirs == []
 
     def test_sandbox_no_excluded_commands(self, tmp_team):
         """Sandbox config should NOT include excludedCommands."""
@@ -456,7 +479,8 @@ class TestNarrowSandbox:
         )
         add_dirs_strs = [str(d) for d in tel.add_dirs]
         git_entries = [d for d in add_dirs_strs if d.endswith("/.git")]
-        assert len(git_entries) > 0, f"Manager should get .git/ dirs: {add_dirs_strs}"
+        # Managers don't work in worktrees — no .git/ access needed
+        assert len(git_entries) == 0, f"Manager should NOT get .git/ dirs: {git_entries}"
 
     @patch("delegate.runtime.random.random", return_value=1.0)
     def test_worker_gets_git_dirs(self, _mock_rng, tmp_team):
@@ -472,6 +496,7 @@ class TestNarrowSandbox:
 
         tel = _create_telephone(
             tmp_team, TEAM, "alice", preamble="test", role="engineer",
+            task_repos=["myrepo"],
         )
         add_dirs_strs = [str(d) for d in tel.add_dirs]
         expected_git = str((repo_path / ".git").resolve())
@@ -512,28 +537,39 @@ class TestRepoChangeReplacement:
     @patch("delegate.runtime.random.random", return_value=1.0)
     @patch("delegate.runtime._create_telephone", side_effect=_make_mock_tel)
     @patch("delegate.network.get_allowed_domains", return_value=["*"])
-    def test_telephone_replaced_when_repos_change(self, _mock_domains, _mock_create, _mock_rng, tmp_team):
-        """If a new repo is registered mid-session, Telephone should be replaced."""
+    def test_telephone_replaced_when_task_repos_change(self, _mock_domains, _mock_create, _mock_rng, tmp_team):
+        """If the task's repos change between turns, Telephone should be replaced."""
         from delegate.repo import register_repo
+        from delegate.task import create_task, update_task
 
         exchange = TelephoneExchange()
 
-        # Turn 1 — no repos
-        _deliver_msg(tmp_team, "alice", body="Turn 1")
-        asyncio.run(run_turn(tmp_team, TEAM, "alice", exchange=exchange))
-        tel_1 = exchange.get(TEAM, "alice")
-        assert tel_1 is not None
-        assert _mock_create.call_count == 1
-
-        # Register a repo (simulates mid-session repo addition)
+        # Register a repo
         repo_path = tmp_team / "_test_repos" / "new-repo"
         repo_path.mkdir(parents=True)
         subprocess.run(["git", "init", str(repo_path)], check=True,
                        capture_output=True)
         register_repo(tmp_team, TEAM, str(repo_path), name="new-repo")
 
-        # Turn 2 — repo list changed, should create new Telephone
-        _deliver_msg(tmp_team, "alice", body="Turn 2")
+        # Create a task without repos, send message on it
+        task = create_task(tmp_team, TEAM, title="No-repo task", assignee="alice")
+        deliver(tmp_team, TEAM, Message(
+            sender="manager", recipient="alice",
+            time="2026-02-08T12:00:00Z", body="Turn 1",
+            task_id=task["id"],
+        ))
+        asyncio.run(run_turn(tmp_team, TEAM, "alice", exchange=exchange))
+        tel_1 = exchange.get(TEAM, "alice")
+        assert tel_1 is not None
+        assert _mock_create.call_count == 1
+
+        # Now add repos to the task (simulates task getting a repo mid-session)
+        update_task(tmp_team, TEAM, task["id"], repo=["new-repo"])
+        deliver(tmp_team, TEAM, Message(
+            sender="manager", recipient="alice",
+            time="2026-02-08T12:01:00Z", body="Turn 2",
+            task_id=task["id"],
+        ))
         asyncio.run(run_turn(tmp_team, TEAM, "alice", exchange=exchange))
         tel_2 = exchange.get(TEAM, "alice")
 

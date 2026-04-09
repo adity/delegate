@@ -613,6 +613,31 @@ def _repo_git_dirs(hc_home: Path, team: str) -> list[str]:
     return sorted(git_dirs)
 
 
+def _task_git_dirs(hc_home: Path, team: str, task_repos: list[str]) -> list[str]:
+    """Return resolved ``.git/`` paths for repos in the current task only.
+
+    Unlike ``_repo_git_dirs`` (which returns ALL team repos), this scopes
+    ``.git/`` sandbox access to only the repos the agent's current task
+    needs.  This prevents agents from modifying the main repo checkout
+    when working on repo-less tasks or tasks targeting different repos.
+    """
+    if not task_repos:
+        return []
+
+    from delegate.repo import get_repo_path
+
+    git_dirs: list[str] = []
+    for repo_name in task_repos:
+        try:
+            real_repo = get_repo_path(hc_home, team, repo_name).resolve()
+            git_dir = real_repo / ".git"
+            if git_dir.is_dir():
+                git_dirs.append(str(git_dir))
+        except Exception:
+            pass
+    return sorted(git_dirs)
+
+
 def _create_telephone(
     hc_home: Path,
     team: str,
@@ -623,6 +648,7 @@ def _create_telephone(
     model: str | None = None,
     ad: Path | None = None,
     mcp_server_factory: Any | None = None,
+    task_repos: list[str] | None = None,
 ) -> Any:
     """Create a new Telephone for an agent.
 
@@ -640,10 +666,10 @@ def _create_telephone(
 
     * **Team working directory** — the team's ``teams/<uuid>/`` dir.
     * **Platform temp directory** — for scratch files.
-    * **Repo ``.git/`` directories** — workers only.  Allows ``git add``
-      / ``git commit`` inside worktrees without opening the repo working
-      tree.  Managers do NOT get ``.git/`` access (they don't work in
-      worktrees).
+    * **Repo ``.git/`` directories** — scoped to the current task's
+      repos (not all team repos).  Allows ``git add`` / ``git commit``
+      inside worktrees without opening the repo working tree or giving
+      access to unrelated repos.  Managers get no ``.git/`` access.
 
     ``denied_bash_patterns`` adds a soft deny layer for dangerous
     commands that complement the ``disallowed_tools`` list.
@@ -667,14 +693,16 @@ def _create_telephone(
     tmpdir = str(Path(tempfile.gettempdir()).resolve())
 
     # Sandbox add_dirs: team working directory + tmpdir.
-    # All agents (workers and managers) get .git/ dirs for git add/commit.
     team_working_dir = str(team_dir(hc_home, team))
     add_dirs = [team_working_dir, tmpdir]
 
-    # Repo .git/ dirs — allows git add/commit without opening the repo
-    # working tree to arbitrary bash writes.
-    git_dirs = _repo_git_dirs(hc_home, team)
-    add_dirs.extend(git_dirs)
+    # Repo .git/ dirs — scoped to the CURRENT TASK's repos, not all team
+    # repos.  This prevents agents on repo-less tasks (or tasks targeting
+    # a different repo) from modifying the main repo checkout via git
+    # checkout/branch commands.  Managers don't get .git/ access.
+    if role != "manager":
+        git_dirs = _task_git_dirs(hc_home, team, task_repos or [])
+        add_dirs.extend(git_dirs)
 
     # MCP server — pluggable: local (default) or remote (satellite)
     if mcp_server_factory is not None:
@@ -906,19 +934,21 @@ async def run_turn(
     # repo list changed (add_dirs is a subprocess-level setting).
     tel = exchange.get(team, agent)
 
+    # Determine the current task's repos for .git/ scoping.
+    task_repos: list[str] = current_task.get("repo", []) if current_task else []
+
     if tel is not None and role != "manager":
-        # Check if registered repos changed (new repo added / removed).
-        # add_dirs is baked into the subprocess — can't be changed via
-        # rotation, so we must close + recreate.
-        # Only workers get .git/ dirs; managers don't work in worktrees.
-        expected_git_dirs = _repo_git_dirs(hc_home, team)
+        # Check if the task's repos changed since the Telephone was
+        # created.  add_dirs is baked into the subprocess — can't be
+        # changed via rotation, so we must close + recreate.
+        expected_git_dirs = _task_git_dirs(hc_home, team, task_repos)
         current_git_dirs = sorted(
             d for d in (str(p) for p in tel.add_dirs)
             if d.endswith("/.git") or d.endswith("\\.git")
         )
         if expected_git_dirs != current_git_dirs:
             logger.info(
-                "Repo list changed for %s/%s — replacing telephone "
+                "Task repo .git/ dirs changed for %s/%s — replacing telephone "
                 "(old=%d repos, new=%d repos)",
                 team, agent, len(current_git_dirs), len(expected_git_dirs),
             )
@@ -962,6 +992,7 @@ async def run_turn(
             model=model,
             ad=ad,
             mcp_server_factory=mcp_server_factory,
+            task_repos=task_repos,
         )
         exchange.put(team, agent, tel)
 

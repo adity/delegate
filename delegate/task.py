@@ -690,17 +690,28 @@ def change_status(hc_home: Path, team: str, task_id: int, status: str, suppress_
         # Legacy validation
         _legacy_validate_transition(current, status)
 
-    # ── Warn if task reaches merge-eligible status without a repo ──
-    _merge_statuses = ("in_review", "in_approval", "merging")
-    if status in _merge_statuses:
+    # ── Guard repo-less tasks at merge boundary ──
+    # Tasks without a repo cannot get a worktree or branch, so the merge
+    # pipeline cannot land them.  ``merging`` is a hard block; earlier
+    # statuses are warnings (the real protection is per-task .git/
+    # sandbox scoping — repo-less tasks get no .git/ access at all).
+    _repo_check_statuses = ("in_progress", "in_review", "in_approval", "merging")
+    if status in _repo_check_statuses:
         repos: list[str] = old_task.get("repo", [])
-        branch: str = old_task.get("branch", "")
-        if not repos or not branch:
+        if not repos:
             _log = logging.getLogger(__name__)
             _log.warning(
-                "%s: transitioning to %s without repo/branch — "
-                "merge pipeline will not be able to land this task. "
-                "Was it created without --repo?",
+                "%s: entering %s without a repo — "
+                "agent will have no worktree and no .git/ access. "
+                "Was this task created without --repo?",
+                format_task_id(task_id), status,
+            )
+        branch: str = old_task.get("branch", "")
+        if repos and not branch and status in ("in_review", "in_approval", "merging"):
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "%s: transitioning to %s with repos but no branch — "
+                "merge pipeline will not be able to land this task.",
                 format_task_id(task_id), status,
             )
 

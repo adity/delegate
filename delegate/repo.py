@@ -117,18 +117,38 @@ def ensure_default_branch_checked_out(repo_dir: str | Path) -> bool:
         return False
 
     dirty = status.stdout.strip()
+    stashed = False
     if dirty:
+        # Dirty working tree on a delegate branch — likely agent changes
+        # made directly on the main repo (a bug).  Stash them so we can
+        # restore the default branch, then leave the stash for manual
+        # recovery if needed.
         logger.warning(
             "Main repo %s is on branch %r (not %s) with uncommitted "
-            "changes — skipping auto-reset to avoid data loss",
+            "changes — stashing before auto-reset",
             repo_dir, current, db,
         )
-        return False
+        stash_result = subprocess.run(
+            ["git", "stash", "--include-untracked", "-m",
+             f"delegate-auto-heal: stashed from {current}"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if stash_result.returncode != 0:
+            logger.error(
+                "Failed to stash changes in %s — skipping auto-reset: %s",
+                repo_dir, stash_result.stderr.strip(),
+            )
+            return False
+        stashed = True
 
     logger.warning(
         "Main repo %s has branch %r checked out instead of %s — "
-        "resetting to %s (self-healing)",
+        "resetting to %s (self-healing%s)",
         repo_dir, current, db, db,
+        "; changes stashed" if stashed else "",
     )
     checkout = subprocess.run(
         ["git", "checkout", db],
@@ -144,7 +164,9 @@ def ensure_default_branch_checked_out(repo_dir: str | Path) -> bool:
         )
         return False
 
-    logger.info("Self-healed: %s now on %s (was %s)", repo_dir, db, current)
+    logger.info("Self-healed: %s now on %s (was %s%s)",
+                repo_dir, db, current,
+                "; run 'git stash pop' to recover changes" if stashed else "")
     return True
 
 
