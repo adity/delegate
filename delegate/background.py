@@ -370,6 +370,121 @@ def read_summary(agent_dir: Path, handle: str) -> dict[str, str | bool]:
 
 
 # ---------------------------------------------------------------------------
+# Bounded log excerpt — for the researcher_assistant role
+# ---------------------------------------------------------------------------
+#
+# Training logs can grow to hundreds of MB.  Reading them with cat / Read
+# would blow any agent's context and risk overflowing the SDK's 1 MB JSON
+# buffer.  ``log_excerpt`` enforces hard server-side caps so the assistant
+# can never accidentally drag a 500 MB log into its context.
+
+# Hard caps — never exceeded regardless of caller-supplied parameters.
+LOG_EXCERPT_MAX_LINES = 200
+LOG_EXCERPT_MAX_BYTES = 32 * 1024  # 32 KB
+LOG_EXCERPT_DEFAULT_LINES = 50
+
+
+def log_excerpt(
+    agent_dir: Path,
+    handle: str,
+    *,
+    source: str = "stdout",
+    grep_pattern: str | None = None,
+    max_lines: int = LOG_EXCERPT_DEFAULT_LINES,
+    tail: bool = True,
+) -> dict[str, Any]:
+    """Return a bounded excerpt from a background process's log file.
+
+    Hard caps (server-enforced):
+      * at most ``LOG_EXCERPT_MAX_LINES`` lines per call
+      * at most ``LOG_EXCERPT_MAX_BYTES`` bytes of content returned
+      * file is streamed, never fully loaded into memory
+
+    Args:
+        agent_dir: The agent's home directory.
+        handle: Background process handle.
+        source: ``"stdout"``, ``"stderr"``, or ``"both"``.
+        grep_pattern: Optional Python regex to filter lines.  Only matching
+            lines count toward ``max_lines``.
+        max_lines: Caller-requested cap (clamped to ``LOG_EXCERPT_MAX_LINES``).
+        tail: If True, return the *last* N matching lines; otherwise the first.
+
+    Returns:
+        ``{"source": str, "lines": list[str], "total_bytes": int,
+           "truncated": bool, "matched_lines": int}``
+        Returns ``{"error": str}`` if the handle / source is invalid.
+    """
+    import re
+
+    if source not in ("stdout", "stderr", "both"):
+        return {"error": f"source must be 'stdout' / 'stderr' / 'both', got {source!r}"}
+
+    info = _load_meta(agent_dir, handle)
+    if info is None:
+        return {"error": f"unknown handle: {handle}"}
+
+    cap_lines = max(1, min(int(max_lines or LOG_EXCERPT_DEFAULT_LINES), LOG_EXCERPT_MAX_LINES))
+    pattern = re.compile(grep_pattern) if grep_pattern else None
+
+    sources = [source] if source != "both" else ["stdout", "stderr"]
+    out_lines: list[str] = []
+    total_bytes = 0
+    matched_total = 0
+    truncated = False
+
+    for src in sources:
+        path = _stdout_path(agent_dir, handle) if src == "stdout" else _stderr_path(agent_dir, handle)
+        if not path.exists():
+            continue
+
+        try:
+            # Stream line-by-line; never load the whole file.
+            collected: list[str] = []
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if pattern is not None and not pattern.search(line):
+                        continue
+                    matched_total += 1
+                    collected.append(line.rstrip("\n"))
+                    if not tail and len(collected) >= cap_lines:
+                        # Take the head; can stop reading early.
+                        truncated = True
+                        break
+            # If tailing, keep only the last cap_lines.
+            if tail and len(collected) > cap_lines:
+                collected = collected[-cap_lines:]
+                truncated = True
+        except Exception as exc:
+            return {"error": f"failed to read {src} for {handle}: {exc}"}
+
+        # Apply byte cap as we accumulate across sources.
+        for line in collected:
+            line_bytes = len(line.encode("utf-8", errors="replace")) + 1  # +1 for the newline
+            if total_bytes + line_bytes > LOG_EXCERPT_MAX_BYTES:
+                truncated = True
+                break
+            if source == "both":
+                out_lines.append(f"[{src}] {line}")
+            else:
+                out_lines.append(line)
+            total_bytes += line_bytes
+        else:
+            continue
+        # If we hit the byte cap, stop processing further sources.
+        break
+
+    return {
+        "source": source,
+        "lines": out_lines,
+        "total_bytes": total_bytes,
+        "matched_lines": matched_total,
+        "truncated": truncated,
+        "max_lines_cap": LOG_EXCERPT_MAX_LINES,
+        "max_bytes_cap": LOG_EXCERPT_MAX_BYTES,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

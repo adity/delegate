@@ -224,6 +224,11 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     Returns a list of decorated tool functions ready to pass to
     ``create_sdk_mcp_server(tools=[...])``.
 
+    The tool list is **role-aware**: ``researcher_assistant`` agents get a
+    restricted subset (no task management, no code commits) plus the new
+    ``bg_log_excerpt`` tool for bounded log reading.  All other roles get
+    the full tool set.
+
     Raises ``ImportError`` if ``claude_agent_sdk`` is not available.
     """
     from claude_agent_sdk import tool
@@ -233,6 +238,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     # Resolve the agent's role so background commands respect the sandbox.
     _agent_state = _read_state(_ad(hc_home, team, agent))
     _agent_role = _agent_state.get("role", "engineer")
+    _agent_partner = _agent_state.get("partner")  # set for researcher_assistant
     _, _denied_patterns = _sandbox_for_role(_agent_role)
 
     # -----------------------------------------------------------------------
@@ -257,7 +263,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
     )
     async def mailbox_send(args: dict) -> dict:
         try:
-            from delegate.mailbox import send
+            from delegate.mailbox import send, MailboxAccessDenied
 
             recipient = args["recipient"]
             message = args["message"]
@@ -267,14 +273,31 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             if task_id == 0:
                 task_id = None
 
-            send(
-                hc_home,
-                team,
-                agent,           # sender is baked in — no impersonation
-                recipient,
-                message,
-                task_id=task_id,
-            )
+            # Defense-in-depth for researcher_assistant: refuse non-partner
+            # recipients before even calling send().  The mailbox.send() gate
+            # is the actual enforcement; this just gives a more pointed error.
+            if _agent_role == "researcher_assistant":
+                if recipient != _agent_partner:
+                    return _error_result(
+                        f"You are a researcher_assistant; you can only message "
+                        f"your researcher partner ({_agent_partner})."
+                    )
+
+            try:
+                send(
+                    hc_home,
+                    team,
+                    agent,           # sender is baked in — no impersonation
+                    recipient,
+                    message,
+                    task_id=task_id,
+                )
+            except MailboxAccessDenied as denied:
+                # Clean error — addressability gate rejected the recipient.
+                # Don't log a stack trace for an expected denial.
+                logger.info("mailbox_send denied: %s", denied)
+                return _error_result(f"Mailbox access denied: {denied}")
+
             result = f"Message sent to {recipient}"
             if task_id:
                 result += f" (task T{task_id:04d})"
@@ -1348,6 +1371,62 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
             logger.exception("list_background failed")
             return _error_result(str(e))
 
+    @tool(
+        "bg_log_excerpt",
+        "Read a bounded excerpt from a background process's stdout/stderr "
+        "log. Hard server cap: 200 lines / 32 KB per call. Use grep_pattern "
+        "to filter for metric lines. ALWAYS use this instead of cat/Read on "
+        ".bg/* logs — those files can grow to hundreds of MB.",
+        {
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "Process handle returned by run_background",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "'stdout', 'stderr', or 'both' (default: stdout)",
+                },
+                "grep_pattern": {
+                    "type": "string",
+                    "description": "Optional Python regex; only matching lines are returned",
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Caller-requested cap (server caps at 200; default 50)",
+                },
+                "tail": {
+                    "type": "boolean",
+                    "description": "Last N matching lines (default true) vs first N (false)",
+                },
+            },
+            "required": ["handle"],
+        },
+    )
+    async def bg_log_excerpt(args: dict) -> dict:
+        try:
+            import asyncio
+            from delegate.background import log_excerpt, LOG_EXCERPT_DEFAULT_LINES
+            from delegate.paths import agent_dir as _agent_dir
+
+            ad = _agent_dir(hc_home, team, agent)
+            handle = args["handle"]
+            result = await asyncio.to_thread(
+                log_excerpt,
+                ad, handle,
+                source=args.get("source", "stdout"),
+                grep_pattern=args.get("grep_pattern"),
+                max_lines=args.get("max_lines") or LOG_EXCERPT_DEFAULT_LINES,
+                tail=args.get("tail", True),
+            )
+            if "error" in result:
+                return _error_result(result["error"])
+            return _json_result(result)
+        except Exception as e:
+            logger.exception("bg_log_excerpt failed")
+            return _error_result(str(e))
+
     # -----------------------------------------------------------------------
     # System resource tools
     # -----------------------------------------------------------------------
@@ -1369,6 +1448,25 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         except Exception as e:
             logger.exception("check_resources failed")
             return _error_result(str(e))
+
+    # Researcher assistants get a deliberately small toolset.  They submit
+    # experiments, monitor logs (via bg_log_excerpt), persist artifacts on
+    # the researcher's behalf, and forward summaries — nothing else.
+    if _agent_role == "researcher_assistant":
+        return [
+            mailbox_send,        # restricted to partner via inline guard
+            mailbox_inbox,
+            task_show,           # read-only — partner's task spec
+            run_background,
+            check_background,
+            cancel_background,
+            list_background,
+            bg_log_excerpt,      # bounded log reading (200 lines / 32 KB)
+            artifact_save,       # save checkpoints/plots on partner's behalf
+            artifact_list,
+            artifact_path,
+            check_resources,
+        ]
 
     return [
         mailbox_send,
@@ -1394,6 +1492,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
         check_background,
         cancel_background,
         list_background,
+        bg_log_excerpt,
         check_resources,
     ]
 
