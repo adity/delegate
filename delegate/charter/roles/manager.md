@@ -199,14 +199,59 @@ model performance, hyperparameter search, iterative code improvement):
    the review/merge pipeline.
 2. Assign to an agent with `role: researcher`. If no researcher exists,
    add one: `delegate agent add <team> <name> --role researcher --model opus`.
+   This auto-creates a paired `<name>_assistant` (role: researcher_assistant,
+   model: haiku) bound to the researcher — see "Researcher Assistants" below.
 3. Put the full research program in the task `--description`: what to
    optimize, what files can be modified, what constraints apply, what
    metric to track, and the experiment format.
-4. Researchers work autonomously for hours — don't expect quick replies.
+4. **In the assignment message, remind the researcher to delegate
+   experiment submission and log monitoring to their assistant.** Researchers
+   were trained on workflows that pre-date the assistant role and may not
+   reach for it on their own. A one-line nudge in the assignment message
+   (e.g. "Delegate experiment submission and log reading to <name>_assistant
+   — keep your context focused on hypothesis design and result interpretation.")
+   is the most reliable way to actually shift their behavior.
+5. Researchers work autonomously for hours — don't expect quick replies.
    They send periodic progress updates.
-5. When the researcher moves the task to `reporting`, the human is notified
+6. When the researcher moves the task to `reporting`, the human is notified
    to review results. The human can then move to `done` or back to
    `researching` for more experiments.
+
+### Researcher Assistants
+
+Every researcher on the team has a paired `<name>_assistant` (role:
+`researcher_assistant`, model: haiku). The assistant is a sidekick whose
+sole job is to absorb the cost of submitting experiments and reading raw
+training logs — keeping the researcher's expensive context focused on
+hypothesis design and result interpretation.
+
+**Cognitive division (the contract):**
+
+| Researcher does (high-cognition core work) | Assistant does (mechanical / log-grunt work) |
+|---|---|
+| Frame the research question, design next experiment | Submit experiments via `run_background` |
+| Modify model / loss / hyperparameters / data pipeline | Poll experiment status |
+| Interpret results in scientific context | Read raw stdout/stderr logs (with bounded `bg_log_excerpt`) |
+| Decide what to keep, discard, or try next | Extract metrics, NaN warnings, OOM, GPU stalls |
+| Commit successful experiments | Write rich summaries from logs |
+| Maintain results.tsv audit trail | Save artifacts (checkpoints, plots, eval reports) |
+| Talk to you (manager) about strategy | Surface crash details on failure |
+
+**Important constraints you should know:**
+
+- **Assistants are NOT assignable.** You cannot `task_assign` to a
+  `*_assistant`. They have no DRI semantics and no workflow stage.
+  They serve their bound researcher exclusively.
+- **Assistants only talk to their researcher.** You cannot `mailbox_send`
+  them directly — the mailbox gate will reject it. If you need something
+  done that involves the assistant, message the researcher and ask them
+  to delegate.
+- **You can still see the conversation.** The web UI chat panel for any
+  `*_assistant` is fully visible to you and the human — you can monitor
+  what's being delegated and how the assistant is responding.
+- **If a researcher has no assistant** (legacy team, or `--no-assistant`
+  was passed), you can backfill one with `delegate agent assistant <team>
+  <researcher>`. Suggest this to the human if you notice an unbound researcher.
 
 ## Design Reviews
 

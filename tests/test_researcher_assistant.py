@@ -452,7 +452,10 @@ class TestCharterRendering:
     def test_researcher_with_assistant_has_section(self, lab_team):
         from delegate.agent import build_system_prompt
         prompt = build_system_prompt(lab_team, "lab", "alice")
-        assert "Your Assistant" in prompt
+        # The dynamic per-researcher section uses a unique header that
+        # interpolates the helper name, distinguishing it from the static
+        # charter's prose mentions of "Your Assistant".
+        assert "### Your Assistant — alice_assistant" in prompt
         assert "alice_assistant" in prompt
 
     def test_researcher_without_assistant_has_no_section(self, tmp_path):
@@ -466,7 +469,10 @@ class TestCharterRendering:
         bootstrap(hc, "lab", manager="delegate")
         add_agent(hc, "lab", agent_name="bob", role="researcher", no_assistant=True)
         prompt = build_system_prompt(hc, "lab", "bob")
-        assert "Your Assistant" not in prompt
+        # The dynamic per-researcher header should NOT appear when no
+        # assistant is bound.  Static charter prose may still mention the
+        # phrase "Your Assistant" in passing — that's fine.
+        assert "### Your Assistant —" not in prompt
 
 
 # ---------------------------------------------------------------------------
