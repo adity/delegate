@@ -82,9 +82,27 @@ _db_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="delegate-db")
 
 
 async def _run_in_db_pool(fn, *args, **kwargs):
-    """Run *fn(*args, **kwargs)* in the dedicated DB/IO thread pool."""
+    """Run *fn(*args, **kwargs)* in the dedicated DB/IO thread pool.
+
+    Wrapped in ``asyncio.shield`` so that if the awaiting task is cancelled
+    (e.g. client disconnect, daemon shutdown, interrupt_agent), the await
+    raises ``CancelledError`` *immediately* on the awaiter and the task can
+    transition to "done" state on the next loop tick.
+
+    Without the shield, the asyncio.Future returned by ``run_in_executor``
+    stays in PENDING state until the worker thread finishes (because
+    ``concurrent.futures.Future.cancel()`` returns False on a running
+    worker), which leaves ``task._fut_waiter.done() == False``, which
+    keeps anyio's ``CancelScope._deliver_cancellation`` re-scheduling
+    itself on every event-loop tick — pegging the main thread at 100%
+    CPU until the worker drains.
+
+    The shielded inner future is left running. The worker thread finishes
+    naturally; its result is discarded.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_db_pool, functools.partial(fn, *args, **kwargs))
+    fut = loop.run_in_executor(_db_pool, functools.partial(fn, *args, **kwargs))
+    return await asyncio.shield(fut)
 
 
 # ---------------------------------------------------------------------------
@@ -4014,8 +4032,6 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     except asyncio.TimeoutError:
                         # Send keepalive comment to prevent proxy/browser timeout
                         yield ": keepalive\n\n"
-            except asyncio.CancelledError:
-                pass
             finally:
                 unsubscribe(queue)
 
@@ -4054,8 +4070,6 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     except asyncio.TimeoutError:
                         # Send keepalive comment to prevent proxy/browser timeout
                         yield ": keepalive\n\n"
-            except asyncio.CancelledError:
-                pass
             finally:
                 unsubscribe(queue)
 
