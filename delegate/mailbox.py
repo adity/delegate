@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,122 @@ from delegate.db import get_connection
 from delegate.paths import resolve_team_uuid as _team
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Role lookup cache (used for mailbox addressability rules)
+# ---------------------------------------------------------------------------
+#
+# Some roles (notably researcher_assistant) are scoped — they may only
+# exchange messages with a specific partner.  Enforcing those rules requires
+# knowing each agent's role and partner, which lives in state.yaml on disk.
+# Reading state.yaml on every send() would be expensive, so we cache the
+# (role, partner) pair per (team, agent).
+#
+# The cache is invalidated explicitly via ``invalidate_role_cache()`` from
+# the bootstrap helpers when agents are added/removed/renamed.
+
+_role_cache: dict[tuple[str, str], tuple[str, str | None]] = {}
+_role_cache_lock = threading.Lock()
+
+
+def _lookup_role(hc_home: Path, team: str, agent: str) -> tuple[str, str | None]:
+    """Return ``(role, partner)`` for *agent*, or ``("", None)`` if unknown.
+
+    Reads ``state.yaml`` on cache miss and caches the result for the
+    process lifetime.  Used by the addressability gate to enforce
+    scoped-mailbox rules without round-tripping to disk on every send.
+    """
+    key = (team, agent)
+    with _role_cache_lock:
+        cached = _role_cache.get(key)
+    if cached is not None:
+        return cached
+
+    role = ""
+    partner: str | None = None
+    try:
+        import yaml
+        from delegate.paths import agent_dir as _agent_dir
+        ad = _agent_dir(hc_home, team, agent)
+        state_file = ad / "state.yaml"
+        if state_file.exists():
+            state = yaml.safe_load(state_file.read_text()) or {}
+            role = state.get("role", "") or ""
+            partner = state.get("partner") or None
+    except Exception:
+        pass  # Unknown agent — caller treats as unrestricted
+
+    with _role_cache_lock:
+        _role_cache[key] = (role, partner)
+    return role, partner
+
+
+def invalidate_role_cache(team: str | None = None, agent: str | None = None) -> None:
+    """Drop cached role/partner entries.
+
+    Called whenever an agent is added, removed, or has its state.yaml
+    rewritten.  Without arguments, clears the entire cache.  With *team*
+    and *agent*, drops only that single entry.
+    """
+    with _role_cache_lock:
+        if team is None and agent is None:
+            _role_cache.clear()
+            return
+        if agent is not None:
+            _role_cache.pop((team, agent), None)
+            return
+        # team-only: drop every entry for that team
+        keys_to_drop = [k for k in _role_cache if k[0] == team]
+        for k in keys_to_drop:
+            _role_cache.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Addressability — scoped-mailbox enforcement
+# ---------------------------------------------------------------------------
+
+class MailboxAccessDenied(PermissionError):
+    """Raised when a mailbox.send() is rejected by the addressability gate.
+
+    Distinct from generic ``PermissionError`` so MCP / HTTP layers can
+    catch it specifically and return a clean error to the caller without
+    swallowing other permission errors.
+    """
+
+
+def _is_addressable(
+    hc_home: Path, team: str, sender: str, recipient: str,
+) -> tuple[bool, str]:
+    """Return ``(allowed, reason)`` for a sender→recipient message.
+
+    The only role with restricted mailbox access today is
+    ``researcher_assistant``: it may only exchange messages with its
+    bound ``partner`` (a researcher).  ``SYSTEM_USER`` is always allowed
+    in either direction so that auto-continue, deferred bg notifications,
+    and stall-detector messages keep working.
+    """
+    from delegate.config import SYSTEM_USER
+    if sender == SYSTEM_USER or recipient == SYSTEM_USER:
+        return True, ""
+
+    rec_role, rec_partner = _lookup_role(hc_home, team, recipient)
+    if rec_role == "researcher_assistant":
+        if sender != rec_partner:
+            return False, (
+                f"{recipient} is a researcher_assistant scoped to {rec_partner}; "
+                f"only {rec_partner} (or SYSTEM) may send to it"
+            )
+
+    snd_role, snd_partner = _lookup_role(hc_home, team, sender)
+    if snd_role == "researcher_assistant":
+        if recipient != snd_partner:
+            return False, (
+                f"{sender} is a researcher_assistant; it may only message its "
+                f"partner ({snd_partner})"
+            )
+
+    return True, ""
 
 
 @dataclass
@@ -96,8 +213,17 @@ def send(
     Messages are delivered immediately (``delivered_at`` set on insert).
     Single write to the unified messages table.
 
+    Raises ``MailboxAccessDenied`` when the addressability gate rejects
+    the sender→recipient pair (e.g. an outsider trying to message a
+    scoped researcher_assistant).
+
     Returns the message id.
     """
+    # Hard gate: scoped-role addressability (researcher_assistant)
+    allowed, reason = _is_addressable(hc_home, team, sender, recipient)
+    if not allowed:
+        raise MailboxAccessDenied(reason)
+
     # Soft validation: warn when non-human messages lack task_id
     # System user messages are always valid (automated events).
     from delegate.config import SYSTEM_USER
@@ -317,8 +443,15 @@ def deliver(hc_home: Path, team: str, message: Message) -> int:
     Uses ``message.task_id`` if set.
     Used by notification helpers that construct Messages themselves.
 
+    Raises ``MailboxAccessDenied`` if the sender→recipient pair fails the
+    addressability gate.
+
     Returns the message id.
     """
+    allowed, reason = _is_addressable(hc_home, team, message.sender, message.recipient)
+    if not allowed:
+        raise MailboxAccessDenied(reason)
+
     now = _now()
     team_uuid = _team(hc_home, team)
     conn = get_connection(hc_home, team)

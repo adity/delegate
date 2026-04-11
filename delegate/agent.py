@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_IDLE_TIMEOUT = 600
 
 # Allowed model values and defaults
-ALLOWED_MODELS = ("opus", "sonnet")
+ALLOWED_MODELS = ("opus", "sonnet", "haiku")
 DEFAULT_MODEL = "sonnet"
 DEFAULT_MANAGER_MODEL = "sonnet"
+DEFAULT_ASSISTANT_MODEL = "haiku"
 
 # Legacy seniority -> model mapping for backward compatibility
 SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
@@ -39,6 +40,8 @@ SENIORITY_MAP = {"senior": "opus", "junior": "sonnet"}
 
 def resolve_model(state: dict, role: str) -> str:
     """Resolve the model for an agent from its state and role."""
+    if role == "researcher_assistant":
+        return state.get("model") or DEFAULT_ASSISTANT_MODEL
     return (
         state.get("model")
         or SENIORITY_MAP.get(state.get("seniority", ""), None)
@@ -360,6 +363,11 @@ def build_system_prompt(
     if role_path.is_file():
         content = role_path.read_text().strip()
         if content:
+            # researcher_assistant charter contains {partner} placeholders
+            # that must be substituted with the bound researcher's name.
+            if role == "researcher_assistant":
+                partner_name = state.get("partner") or "(unbound)"
+                content = content.replace("{partner}", partner_name)
             role_parts.append(content)
 
     # Append applicable addon charters (e.g. ml.md when GPU detected)
@@ -372,6 +380,33 @@ def build_system_prompt(
                 addon_content = addon_path.read_text().strip()
                 if addon_content:
                     role_parts.append(addon_content)
+
+    # Researchers with a bound assistant get a dynamic section telling
+    # them to delegate experiment submission and log reading to the
+    # assistant.  Without this, the researcher won't know to use them.
+    if role == "researcher":
+        helper_name = state.get("assistant")
+        if helper_name:
+            role_parts.append(
+                f"### Your Assistant — {helper_name}\n\n"
+                f"You have a dedicated Haiku assistant ({helper_name}) bound to "
+                f"you. Delegate experiment submission and log reading to them — "
+                f"that's why they exist.\n\n"
+                f"- **Want to run an experiment?** `mailbox_send` to {helper_name} "
+                f"with the exact command, working directory, and any config. "
+                f"They'll launch it via `run_background` with the output "
+                f"contract wired.\n"
+                f"- **Want to know how a running experiment is doing?** Ask "
+                f"{helper_name}. They'll check it without polluting your context.\n"
+                f"- **They will proactively message you with rich summaries** "
+                f"when experiments complete. You do NOT need to poll, call "
+                f"`check_background`, or read logs yourself.\n"
+                f"- **Always include `task_id`** when messaging {helper_name} "
+                f"so they can resolve the worktree path for the experiment.\n\n"
+                f"You and {helper_name} talk via `mailbox_send` like normal "
+                f"teammates. They only talk to you — no other agent on the team "
+                f"can mail them, and they cannot mail anyone else."
+            )
 
     role_block = ("\n\n---\n\n" + "\n\n".join(role_parts)) if role_parts else ""
 

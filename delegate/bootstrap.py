@@ -8,12 +8,15 @@ Usage:
 """
 
 import argparse
+import logging
 import re
 import subprocess
 import uuid
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from delegate.db import ensure_schema
 from delegate.paths import (
@@ -152,14 +155,29 @@ AGENT_SUBDIRS = [
 
 
 def _default_model(role: str) -> str:
-    """All roles default to sonnet."""
+    """Default model per role.
+
+    Researcher assistants run on Haiku — they exist to absorb the cost of
+    log reading and grunt work, so the cheap model is the right choice.
+    All other roles default to Sonnet.
+    """
+    if role == "researcher_assistant":
+        return "haiku"
     return "sonnet"
 
 
-def _default_state(role: str, model: str | None = None) -> dict:
+def _default_state(
+    role: str,
+    model: str | None = None,
+    *,
+    partner: str | None = None,
+) -> dict:
     if model is None:
         model = _default_model(role)
-    return {"role": role, "model": model, "pid": None, "token_budget": None, "host": None}
+    state: dict = {"role": role, "model": model, "pid": None, "token_budget": None, "host": None}
+    if partner is not None:
+        state["partner"] = partner
+    return state
 
 
 def make_roster(
@@ -430,21 +448,34 @@ def add_agent(
     role: str = "engineer",
     model: str | None = None,
     bio: str | None = None,
-) -> None:
+    *,
+    partner: str | None = None,
+    no_assistant: bool = False,
+) -> str:
     """Add a new agent to an existing team.
 
     Creates the full agent directory structure (all AGENT_SUBDIRS),
     state.yaml, bio.md, and context.md.  Appends the agent to the
     team's roster.md.
 
+    When the new agent has role ``researcher``, a paired
+    ``<name>_assistant`` agent is auto-created with role
+    ``researcher_assistant`` and model ``haiku`` (unless *no_assistant*
+    is True).  The assistant's ``partner`` field is set to the
+    researcher's name.
+
     Args:
         hc_home: Delegate home directory (~/.delegate).
         team_name: Name of the existing team.
         agent_name: Name for the new agent. If None, a random name is generated.
         role: Agent role (default ``"engineer"``).
-        model: ``"opus"`` or ``"sonnet"``.  Defaults based on role
-            (manager → opus, others → sonnet).
+        model: ``"opus"``, ``"sonnet"``, or ``"haiku"``.  Defaults based on role.
         bio: Optional bio text.  If omitted a placeholder is written.
+        partner: For ``researcher_assistant`` role only — the researcher
+            this assistant is bound to.  Persisted in state.yaml.
+        no_assistant: If True, skip the auto-spawn of a researcher_assistant
+            when creating a researcher.  Used internally to prevent
+            recursion and exposed via CLI for opt-out.
 
     Returns:
         The agent name (either the provided name or the auto-generated one).
@@ -452,9 +483,15 @@ def add_agent(
     Raises:
         FileNotFoundError: If the team does not exist.
         ValueError: If the agent name already exists on this team
-            or conflicts with a human member name.
+            or conflicts with a human member name, or if a
+            researcher_assistant is created without a partner.
     """
     from delegate.agent import ALLOWED_MODELS
+    if role == "researcher_assistant" and not partner:
+        raise ValueError(
+            "researcher_assistant requires a partner (the researcher's name); "
+            "use add_agent(..., role='researcher_assistant', partner=<name>)"
+        )
     if model is None:
         model = _default_model(role)
     if model not in ALLOWED_MODELS:
@@ -514,9 +551,12 @@ def add_agent(
     # Context
     (member_dir / "context.md").write_text("")
 
-    # State
+    # State (includes partner for researcher_assistant)
     (member_dir / "state.yaml").write_text(
-        yaml.dump(_default_state(role, model), default_flow_style=False)
+        yaml.dump(
+            _default_state(role, model, partner=partner),
+            default_flow_style=False,
+        )
     )
 
     # --- register agent in member_ids translation table ---
@@ -546,7 +586,158 @@ def add_agent(
     roster_text += roster_line + "\n"
     rp.write_text(roster_text)
 
+    # Invalidate the mailbox role cache so the new agent is picked up
+    # immediately by the addressability gate.
+    from delegate.mailbox import invalidate_role_cache
+    invalidate_role_cache(team_name, agent_name)
+
+    # --- Auto-spawn researcher_assistant for new researchers ---
+    # Convention: <researcher>_assistant.  Skip if --no-assistant was
+    # passed, or if creation would collide with an existing agent name
+    # (collision is a hard error — the user must rename or use --no-assistant).
+    if role == "researcher" and not no_assistant:
+        helper_name = f"{agent_name}_assistant"
+        if (agents_root / helper_name).exists():
+            raise ValueError(
+                f"Cannot auto-create assistant '{helper_name}' for researcher "
+                f"'{agent_name}': an agent with that name already exists. "
+                f"Rename the existing agent or pass --no-assistant."
+            )
+        try:
+            add_agent(
+                hc_home,
+                team_name,
+                agent_name=helper_name,
+                role="researcher_assistant",
+                model="haiku",
+                bio=f"Sidekick to {agent_name}. Submits experiments and reads logs so {agent_name} doesn't have to.",
+                partner=agent_name,
+                no_assistant=True,  # prevent infinite recursion
+            )
+            # Back-reference: store the assistant name on the researcher.
+            state_path = member_dir / "state.yaml"
+            researcher_state = yaml.safe_load(state_path.read_text()) or {}
+            researcher_state["assistant"] = helper_name
+            state_path.write_text(yaml.dump(researcher_state, default_flow_style=False))
+            invalidate_role_cache(team_name, agent_name)
+        except Exception as exc:
+            # If assistant creation fails, the researcher is already on disk.
+            # Surface the error so the operator knows the team is in a
+            # half-spawned state — they can rerun add_agent for the assistant
+            # via the CLI backfill.
+            logger.warning(
+                "Auto-spawn of assistant for %s failed: %s — "
+                "use 'delegate agent assistant %s %s' to retry",
+                agent_name, exc, team_name, agent_name,
+            )
+
     return agent_name
+
+
+def add_assistant_for_researcher(
+    hc_home: Path,
+    team_name: str,
+    researcher_name: str,
+) -> str:
+    """Manually create a researcher_assistant for an existing researcher.
+
+    Used by the ``delegate agent assistant`` CLI command to backfill
+    assistants for researchers that were created before the auto-spawn
+    feature existed.
+
+    Returns the assistant's name (``<researcher>_assistant``).
+
+    Raises:
+        FileNotFoundError: If the researcher doesn't exist on the team.
+        ValueError: If the named agent isn't a researcher, or already has
+            an assistant, or the assistant name collides with an existing agent.
+    """
+    agents_root = _agents_dir(hc_home, team_name)
+    researcher_dir = agents_root / researcher_name
+    if not researcher_dir.is_dir():
+        raise FileNotFoundError(
+            f"Agent '{researcher_name}' does not exist on team '{team_name}'"
+        )
+    state_path = researcher_dir / "state.yaml"
+    if not state_path.exists():
+        raise FileNotFoundError(
+            f"Agent '{researcher_name}' has no state.yaml — corrupt team?"
+        )
+    state = yaml.safe_load(state_path.read_text()) or {}
+    if state.get("role") != "researcher":
+        raise ValueError(
+            f"Agent '{researcher_name}' has role '{state.get('role')}', not "
+            f"'researcher' — assistants can only be bound to researchers"
+        )
+    if state.get("assistant"):
+        existing = state["assistant"]
+        raise ValueError(
+            f"Researcher '{researcher_name}' already has an assistant: {existing}"
+        )
+
+    helper_name = f"{researcher_name}_assistant"
+    if (agents_root / helper_name).exists():
+        raise ValueError(
+            f"Cannot create assistant '{helper_name}': an agent with that "
+            f"name already exists on team '{team_name}'"
+        )
+
+    add_agent(
+        hc_home,
+        team_name,
+        agent_name=helper_name,
+        role="researcher_assistant",
+        model="haiku",
+        bio=f"Sidekick to {researcher_name}. Submits experiments and reads logs so {researcher_name} doesn't have to.",
+        partner=researcher_name,
+        no_assistant=True,
+    )
+    # Back-reference on the researcher
+    state["assistant"] = helper_name
+    state_path.write_text(yaml.dump(state, default_flow_style=False))
+
+    from delegate.mailbox import invalidate_role_cache
+    invalidate_role_cache(team_name, researcher_name)
+    return helper_name
+
+
+def remove_assistant_for_researcher(
+    hc_home: Path,
+    team_name: str,
+    researcher_name: str,
+) -> str | None:
+    """Remove the assistant bound to *researcher_name*, if any.
+
+    Tears down the assistant's directory and clears the back-reference
+    on the researcher's state.yaml.  Returns the removed assistant's
+    name, or None if the researcher has no assistant.
+    """
+    import shutil
+
+    agents_root = _agents_dir(hc_home, team_name)
+    researcher_dir = agents_root / researcher_name
+    if not researcher_dir.is_dir():
+        raise FileNotFoundError(
+            f"Agent '{researcher_name}' does not exist on team '{team_name}'"
+        )
+    state_path = researcher_dir / "state.yaml"
+    state = yaml.safe_load(state_path.read_text()) or {}
+    helper_name = state.get("assistant")
+    if not helper_name:
+        return None
+
+    helper_dir = agents_root / helper_name
+    if helper_dir.is_dir():
+        shutil.rmtree(helper_dir)
+
+    # Clear back-reference on researcher
+    state.pop("assistant", None)
+    state_path.write_text(yaml.dump(state, default_flow_style=False))
+
+    from delegate.mailbox import invalidate_role_cache
+    invalidate_role_cache(team_name, researcher_name)
+    invalidate_role_cache(team_name, helper_name)
+    return helper_name
 
 
 def get_member_by_role(hc_home: Path, team: str, role: str) -> str | None:

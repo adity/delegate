@@ -203,6 +203,18 @@ def create_task(
                 f"Assign to a worker agent instead."
             )
 
+    # Guard: researcher_assistant agents cannot be assigned tasks.
+    # They exist only to serve their bound researcher and have no task
+    # ownership semantics (no DRI, no workflow stage, no stall detection).
+    from delegate.mailbox import _lookup_role as _mb_lookup_role
+    assignee_role, _ = _mb_lookup_role(hc_home, team, assignee.strip())
+    if assignee_role == "researcher_assistant":
+        raise ValueError(
+            f"Cannot assign a task to researcher_assistant '{assignee.strip()}'. "
+            f"Assistants are sidekicks to a researcher and cannot own tasks. "
+            f"Assign the task to the researcher (their partner) instead."
+        )
+
     # Resolve workflow version
     if workflow_version is None:
         from delegate.workflow import get_latest_version
@@ -461,6 +473,17 @@ def assign_task(hc_home: Path, team: str, task_id: int, assignee: str, suppress_
                 f"repo task ({format_task_id(task_id)}). The manager has no "
                 f"worktree isolation. Assign to a worker agent instead."
             )
+
+    # Guard: researcher_assistant agents cannot be assigned tasks.
+    from delegate.mailbox import _lookup_role as _mb_lookup_role
+    assignee_role, _ = _mb_lookup_role(hc_home, team, assignee.strip())
+    if assignee_role == "researcher_assistant":
+        raise ValueError(
+            f"Cannot assign task {format_task_id(task_id)} to "
+            f"researcher_assistant '{assignee.strip()}'. Assistants are "
+            f"sidekicks to a researcher and cannot own tasks. Assign the "
+            f"task to the researcher (their partner) instead."
+        )
 
     updates: dict[str, str] = {"assignee": assignee}
     if not task.get("dri"):

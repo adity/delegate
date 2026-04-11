@@ -140,27 +140,54 @@ _RESEARCHER_GIT_ALLOWLIST = {
     "git branch",
 }
 
+# Extra restrictions for the researcher_assistant role.
+#
+# The assistant submits experiments and reads logs but never commits code —
+# the researcher owns the commit history.  We also block direct reads of the
+# `.bg/` log files because they can grow to hundreds of MB; the assistant
+# must use the `bg_log_excerpt` MCP tool which has a hard server-side cap.
+_ASSISTANT_EXTRA_DISALLOWED = [
+    "Bash(git commit:*)",
+    "Bash(git add:*)",
+]
+_ASSISTANT_EXTRA_DENIED = [
+    "git commit",
+    "git add ",
+    "/.bg/",          # blocks cat/tail/head/grep/less on .bg paths
+    ".bg/stdout.log",
+    ".bg/stderr.log",
+]
+
 
 def _sandbox_for_role(role: str) -> tuple[list[str], list[str]]:
     """Return (disallowed_tools, denied_bash_patterns) adjusted for *role*.
 
-    Researchers need ``git checkout`` and ``git branch`` to manage
-    experiment branches within their worktree.  All other restrictions
-    remain.  ``git reset --hard`` is NOT allowed — researchers commit
-    reverts instead to preserve experiment history.
+    * **researcher** — needs ``git checkout`` and ``git branch`` to manage
+      experiment branches within their worktree.  ``git reset --hard`` is
+      NOT allowed — researchers commit reverts instead to preserve history.
+    * **researcher_assistant** — inherits the standard restrictions plus
+      no-write-to-git (no ``git commit`` / ``git add``) and no direct reads
+      of ``.bg/`` log files (must use the ``bg_log_excerpt`` tool).
+    * **anyone else** — standard restrictions.
     """
-    if role != "researcher":
-        return DISALLOWED_TOOLS, list(DENIED_BASH_PATTERNS)
+    if role == "researcher":
+        disallowed = [
+            t for t in DISALLOWED_TOOLS
+            if not any(cmd in t for cmd in _RESEARCHER_GIT_ALLOWLIST)
+        ]
+        denied = [
+            p for p in DENIED_BASH_PATTERNS
+            if p not in _RESEARCHER_GIT_ALLOWLIST
+        ]
+        return disallowed, denied
 
-    disallowed = [
-        t for t in DISALLOWED_TOOLS
-        if not any(cmd in t for cmd in _RESEARCHER_GIT_ALLOWLIST)
-    ]
-    denied = [
-        p for p in DENIED_BASH_PATTERNS
-        if p not in _RESEARCHER_GIT_ALLOWLIST
-    ]
-    return disallowed, denied
+    if role == "researcher_assistant":
+        return (
+            DISALLOWED_TOOLS + _ASSISTANT_EXTRA_DISALLOWED,
+            list(DENIED_BASH_PATTERNS) + _ASSISTANT_EXTRA_DENIED,
+        )
+
+    return DISALLOWED_TOOLS, list(DENIED_BASH_PATTERNS)
 
 # Reflection: ~1-in-20 coin flip per turn
 REFLECTION_PROBABILITY = 0.05
@@ -1003,9 +1030,10 @@ async def run_turn(
     if role != "manager" and workspace_paths:
         _tmpdir = str(Path(tempfile.gettempdir()).resolve())
         _extra_paths = [str(p) for p in workspace_paths.values()]
-        # Researchers get write access to the task artifacts directory
-        # and ARTIFACTS_DIR env var for their scripts.
-        if role == "researcher" and current_task_id is not None:
+        # Researchers AND their assistants get write access to the task
+        # artifacts directory plus the ARTIFACTS_DIR env var.  The assistant
+        # uses this for artifact_save() on the researcher's behalf.
+        if role in ("researcher", "researcher_assistant") and current_task_id is not None:
             from delegate.paths import task_artifacts_dir
             _art_dir = task_artifacts_dir(hc_home, team, current_task_id)
             _extra_paths.append(str(_art_dir))
@@ -1288,24 +1316,29 @@ async def run_turn(
         broadcast_turn_event('turn_ended', agent, team=team, task_id=current_task_id, sender=primary_sender)
         log_caller.reset(_prev_caller)
 
-    # --- Researcher auto-continuation ---
-    # After a successful turn, re-check the task status.  If still
-    # "researching", inject a system continuation message so the daemon
-    # dispatches another turn automatically.  If the human paused the
-    # task mid-turn, send a wrap-up message instead so the researcher
-    # documents progress before going idle.
+    # --- Researcher / assistant auto-continuation ---
+    # After a successful turn, re-check the task status and decide whether
+    # to inject a continuation, defer (background processes still running),
+    # or skip.
     #
-    # If background processes are running, defer the continuation until
-    # they complete — avoids expensive poll turns where the researcher
-    # rebuilds the full prompt just to call check_background.
+    #  * researcher           — auto-continue immediately if "researching",
+    #                           defer while bg procs run, wrap-up on pause.
+    #  * researcher_assistant — never auto-continues; only defers while bg
+    #                           procs run.  When they finish, the deferred
+    #                           check sends a "summarize and forward" SYSTEM
+    #                           message that gives the assistant a turn.
     if (
-        role == "researcher"
+        role in ("researcher", "researcher_assistant")
         and current_task_id is not None
         and not error_occurred
     ):
+        _continue_fn = (
+            _auto_continue_researcher if role == "researcher"
+            else _auto_continue_assistant
+        )
         try:
             disposition = await _to_db(
-                _auto_continue_researcher,
+                _continue_fn,
                 hc_home, team, agent, current_task_id, alog,
             )
             if disposition == "deferred":
@@ -1314,8 +1347,8 @@ async def run_turn(
                 )
         except Exception:
             logger.debug(
-                "Researcher auto-continue check failed for %s/%s",
-                team, agent, exc_info=True,
+                "Auto-continue check failed for %s/%s (role=%s)",
+                team, agent, role, exc_info=True,
             )
 
     return result
@@ -1347,6 +1380,18 @@ _BG_DONE_MSG = (
     "SYSTEM: Auto-continue — background process(es) finished since your "
     "last turn.  Review the results and continue your experiment loop.\n\n"
     "{summary}"
+)
+
+# Sent to a researcher_assistant when its bg processes complete.  The
+# assistant is expected to read the logs (via bg_log_excerpt), extract
+# metrics, and forward a rich summary to its researcher partner.
+_BG_DONE_ASSISTANT_MSG = (
+    "SYSTEM: Background experiment(s) you launched have finished.  "
+    "Read the logs (use bg_log_excerpt with grep filters), extract the "
+    "key metrics and any notable events, then forward a rich summary to "
+    "your researcher partner via mailbox_send.  Use task_id={task_id} on "
+    "the message so the researcher knows which task it relates to.\n\n"
+    "Process status:\n{summary}"
 )
 
 # How often to check if deferred background processes have completed (seconds).
@@ -1442,6 +1487,51 @@ def _auto_continue_researcher(
     return "skip"
 
 
+def _auto_continue_assistant(
+    hc_home: Path,
+    team: str,
+    agent: str,
+    task_id: int,
+    alog: AgentLogger,
+) -> str:
+    """Post-turn auto-continue check for a researcher_assistant.
+
+    Unlike researchers, assistants do **not** auto-continue — they only
+    wake up when (a) their partner messages them or (b) a background
+    process they launched completes.  This function exists solely to
+    *defer* the next wake-up while bg processes are running, so the
+    deferred-check timer can fire when they're done.
+
+    Returns:
+        ``"deferred"`` — bg processes still running; reschedule the check.
+        ``"skip"``     — nothing to do; assistant goes idle until messaged.
+    """
+    from delegate.background import list_active
+    from delegate.paths import agent_dir as _agent_dir
+
+    # Re-check task status — if the research task is gone, no work to wait on.
+    try:
+        from delegate.task import get_task as _get_task
+        task = _get_task(hc_home, team, task_id)
+    except Exception:
+        return "skip"
+    status = task.get("status", "")
+    if status not in ("researching", "paused"):
+        return "skip"  # task moved to terminal state — assistant has nothing to do
+
+    ad = _agent_dir(hc_home, team, agent)
+    active = list_active(ad)
+    if active:
+        labels = ", ".join(p.label or p.handle[:8] for p in active)
+        alog.info(
+            "Assistant deferring wake-up for %s — %d background process(es) running: %s",
+            format_task_id(task_id), len(active), labels,
+        )
+        return "deferred"
+
+    return "skip"
+
+
 def _deferred_bg_check(
     hc_home: Path,
     team: str,
@@ -1451,13 +1541,18 @@ def _deferred_bg_check(
 ) -> None:
     """Check if background processes have completed; if so, inject continuation.
 
-    Called on a timer after ``_auto_continue_researcher`` returned ``"deferred"``.
-    If processes are still running, reschedules itself.  If all are done,
-    sends a continuation message with a summary of completed processes.
+    Called on a timer after ``_auto_continue_researcher`` or
+    ``_auto_continue_assistant`` returned ``"deferred"``.  If processes are
+    still running, reschedules itself.  If all are done, sends a SYSTEM
+    continuation message with a summary of completed processes.
+
+    The message body is role-dependent:
+      * **researcher** — "review results and continue your experiment loop"
+      * **researcher_assistant** — "read logs, summarize, forward to partner"
     """
     from delegate.task import get_task as _get_task
     from delegate.background import list_all, read_summary, tail as bg_tail
-    from delegate.mailbox import send as _mailbox_send
+    from delegate.mailbox import send as _mailbox_send, _lookup_role
     from delegate.config import SYSTEM_USER
     from delegate.paths import agent_dir as _agent_dir
 
@@ -1470,7 +1565,17 @@ def _deferred_bg_check(
     if status not in ("researching", "paused"):
         return  # task moved to terminal state — stop checking
 
+    role, _ = _lookup_role(hc_home, team, agent)
+
     if status == "paused":
+        # Wrap-up is researcher-only — the assistant has no progress to
+        # document and should not be told to.  Just stop polling.
+        if role == "researcher_assistant":
+            alog.info(
+                "Assistant deferred check sees paused task %s — stopping",
+                format_task_id(task_id),
+            )
+            return
         _mailbox_send(
             hc_home, team,
             sender=SYSTEM_USER,
@@ -1512,11 +1617,13 @@ def _deferred_bg_check(
         exp = read_summary(ad, p.handle)
         if exp["succeeded"]:
             status_str = f"SUCCESS (exit {p.exit_code})"
-        header = f"- [{p.label or p.handle[:8]}] {status_str}"
+        header = f"- [{p.label or p.handle[:8]}] handle={p.handle} {status_str}"
         if exp["summary"]:
             header += f"\n  {exp['summary']}"
-        elif p.state == "failed":
+        elif p.state == "failed" and role != "researcher_assistant":
             # No summary file — show brief stderr for debugging.
+            # For assistants we skip the inline tail because they have
+            # bg_log_excerpt for bounded reads — keep this message terse.
             logs = bg_tail(ad, p.handle, n=5)
             stderr = logs.get("stderr", "").strip()
             if stderr:
@@ -1524,7 +1631,11 @@ def _deferred_bg_check(
         summary_parts.append(header)
 
     summary = "\n".join(summary_parts) if summary_parts else "Background processes completed."
-    msg = _BG_DONE_MSG.format(summary=summary)
+
+    if role == "researcher_assistant":
+        msg = _BG_DONE_ASSISTANT_MSG.format(summary=summary, task_id=task_id)
+    else:
+        msg = _BG_DONE_MSG.format(summary=summary)
 
     _mailbox_send(
         hc_home, team,
@@ -1534,8 +1645,8 @@ def _deferred_bg_check(
         task_id=task_id,
     )
     alog.info(
-        "Deferred auto-continue injected for %s — %d process(es) completed",
-        format_task_id(task_id), len(recent),
+        "Deferred auto-continue injected for %s — %d process(es) completed (role=%s)",
+        format_task_id(task_id), len(recent), role or "?",
     )
 
 
