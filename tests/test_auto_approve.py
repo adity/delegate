@@ -67,7 +67,7 @@ class TestReviewerConfig:
         cfg = get_reviewer_config(hc_home, team)
         assert cfg["mode"] == "human"
         assert cfg["threshold"] == 3.5
-        assert cfg["model"] == "claude-sonnet-4-20250514"
+        assert cfg["model"] == "claude-sonnet-4-6"
 
     def test_is_reviewer_ai_default_false(self, team_home):
         hc_home, team = team_home
@@ -85,7 +85,7 @@ class TestReviewerConfig:
         result = update_reviewer_config(hc_home, team, mode="ai", threshold=4.0)
         assert result["mode"] == "ai"
         assert result["threshold"] == 4.0
-        assert result["model"] == "claude-sonnet-4-20250514"
+        assert result["model"] == "claude-sonnet-4-6"
 
         cfg = get_reviewer_config(hc_home, team)
         assert cfg["mode"] == "ai"

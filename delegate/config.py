@@ -395,7 +395,7 @@ def get_repo_approval(hc_home: Path, team: str, repo_name: str) -> str:
 _REVIEWER_DEFAULTS = {
     "mode": "human",
     "threshold": 3.5,
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-4-6",
     "auto_merge": True,
 }
 
@@ -470,7 +470,7 @@ def update_reviewer_config(hc_home: Path, team: str, **kwargs) -> dict:
 _AUTO_APPROVER_DEFAULTS = {
     "enabled": False,
     "threshold": 3.5,
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-4-6",
 }
 
 

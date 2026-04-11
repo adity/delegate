@@ -191,11 +191,12 @@ def auto_approve_once(hc_home: Path, team: str) -> dict | None:
     description = task.get("description", "")
     task_spec = f"{title}\n\n{description}".strip()
 
-    # Call judge
+    # Call judge — pass the team's configured reviewer model so each
+    # team can pick its own (defaults to Opus via get_reviewer_config).
     from delegate.eval import judge_diff
 
     try:
-        scores = judge_diff(combined_diff, task_spec)
+        scores = judge_diff(combined_diff, task_spec, model=cfg["model"])
     except Exception as exc:
         logger.warning("auto_approve: judge_diff failed for %s: %s", format_task_id(task_id), exc)
         return None

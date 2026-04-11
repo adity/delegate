@@ -538,22 +538,51 @@ Return a JSON object with exactly these keys:
 """
 
 
-def _call_llm(system: str, user: str, model: str = "claude-sonnet-4-20250514") -> str:
-    """Make a single LLM API call and return the text response.
+def _call_llm(system: str, user: str, model: str = "claude-sonnet-4-6") -> str:
+    """Make a single LLM call and return the text response.
 
-    Uses the anthropic SDK for a straightforward one-shot prompt.
+    Uses ``claude_agent_sdk.query()`` which spawns the Claude CLI as a
+    subprocess — the same auth path ``telephone.py`` uses for agents.
+    This inherits the user's OAuth session from ``~/.claude.json``, so no
+    ``ANTHROPIC_API_KEY`` is required and reviews are billed against the
+    user's Claude subscription rather than a pay-per-token API key.
     """
-    import anthropic
+    import asyncio
 
-    client = anthropic.Anthropic()
-    message = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=system,
-        messages=[{"role": "user", "content": user}],
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        TextBlock,
+        query,
     )
-    # Extract text from the response
-    return message.content[0].text
+
+    # query() has no separate system parameter — prepend it to the user
+    # prompt. The judge is stateless and does no tool use, so a flat
+    # combined prompt is equivalent.
+    prompt = f"{system}\n\n{user}"
+
+    options = ClaudeAgentOptions(
+        model=model,
+        # Judge is a pure-text evaluator — lock down every tool so the
+        # subprocess can't wander off reading files or shelling out.
+        disallowed_tools=[
+            "Bash", "Read", "Write", "Edit", "MultiEdit",
+            "Glob", "Grep", "NotebookEdit",
+            "WebFetch", "WebSearch", "Task",
+        ],
+        max_turns=1,
+    )
+
+    async def _run() -> str:
+        chunks: list[str] = []
+        async for msg in query(prompt=prompt, options=options):
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+        return "".join(chunks)
+
+    return asyncio.run(_run())
 
 
 def _parse_judge_response(text: str) -> dict:
@@ -589,7 +618,12 @@ def _parse_judge_response(text: str) -> dict:
     return data
 
 
-def judge_diff(diff: str, task_spec: str, rubric: str = DEFAULT_RUBRIC) -> dict:
+def judge_diff(
+    diff: str,
+    task_spec: str,
+    rubric: str = DEFAULT_RUBRIC,
+    model: str = "claude-sonnet-4-6",
+) -> dict:
     """Score a git diff against a task spec using an LLM judge.
 
     Calls Claude with a fixed reviewer prompt and rubric.  Retries once on
@@ -599,6 +633,7 @@ def judge_diff(diff: str, task_spec: str, rubric: str = DEFAULT_RUBRIC) -> dict:
         diff: The git diff text to evaluate.
         task_spec: The task specification the diff should satisfy.
         rubric: Scoring rubric text (uses DEFAULT_RUBRIC if not provided).
+        model: Claude model ID to use as the judge.  Defaults to Sonnet 4.6.
 
     Returns:
         Dict with keys: correctness, readability, style, test_quality,
@@ -610,7 +645,7 @@ def judge_diff(diff: str, task_spec: str, rubric: str = DEFAULT_RUBRIC) -> dict:
     last_error = None
     for attempt in range(2):  # retry once on parse failure
         try:
-            raw = _call_llm(system, user_msg)
+            raw = _call_llm(system, user_msg, model=model)
             scores = _parse_judge_response(raw)
             # Compute average
             dim_scores = [scores[d] for d in RUBRIC_DIMENSIONS]
