@@ -376,6 +376,11 @@ def _list_team_agents(hc_home: Path, team: str) -> list[dict]:
             "host": state.get("host"),  # None = local, str = satellite name
             "last_active_at": _agent_last_active_at(d),
             "current_task": _agent_current_task(hc_home, team, d.name, ip_tasks),
+            # Researcher↔assistant binding (None for ordinary roles).  The
+            # frontend uses these to render relationship labels and to omit
+            # assistants from the manager's task-assignment autocomplete.
+            "partner": state.get("partner"),       # set on researcher_assistant
+            "assistant": state.get("assistant"),   # set on bound researcher
         })
     return agents
 

@@ -631,30 +631,136 @@ def agent() -> None:
     help="Role for the new agent (default: engineer).",
 )
 @click.option(
-    "--model", default=None, type=click.Choice(["opus", "sonnet"]),
-    help="Model: opus or sonnet. Default: sonnet for all roles.",
+    "--model", default=None, type=click.Choice(["opus", "sonnet", "haiku"]),
+    help="Model: opus, sonnet, or haiku. Defaults to sonnet for most roles, "
+         "haiku for researcher_assistant.",
 )
 @click.option(
     "--bio", default=None,
     help="Short bio/description of the agent's strengths and focus.",
 )
+@click.option(
+    "--no-assistant", is_flag=True, default=False,
+    help="When --role=researcher, skip auto-creation of the paired "
+         "researcher_assistant agent.",
+)
 @click.pass_context
-def agent_add(ctx: click.Context, team: str, name: str | None, role: str, model: str, bio: str | None) -> None:
+def agent_add(
+    ctx: click.Context,
+    team: str,
+    name: str | None,
+    role: str,
+    model: str,
+    bio: str | None,
+    no_assistant: bool,
+) -> None:
     """Add a new agent to an existing team.
 
     TEAM is the team name.  NAME is the new agent's name (optional - auto-generated if omitted).
+
+    When adding a researcher, a paired ``<name>_assistant`` agent is
+    auto-created with role ``researcher_assistant`` and model ``haiku``.
+    Pass --no-assistant to skip this.
     """
     from delegate.bootstrap import add_agent
     from delegate.fmt import success
 
     hc_home = _get_home(ctx)
     try:
-        agent_name = add_agent(hc_home, team_name=team, agent_name=name, role=role, model=model, bio=bio)
+        agent_name = add_agent(
+            hc_home,
+            team_name=team,
+            agent_name=name,
+            role=role,
+            model=model,
+            bio=bio,
+            no_assistant=no_assistant,
+        )
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc))
 
-    resolved_model = model or "sonnet"
+    resolved_model = model or ("haiku" if role == "researcher_assistant" else "sonnet")
     success(f"Added agent '{agent_name}' to team '{team}' (role: {role}, model: {resolved_model})")
+    if role == "researcher" and not no_assistant:
+        success(f"  Auto-created assistant '{agent_name}_assistant' (role: researcher_assistant, model: haiku)")
+
+
+@agent.command("assistant")
+@click.argument("team")
+@click.argument("researcher")
+@click.option(
+    "--remove", is_flag=True, default=False,
+    help="Remove the assistant bound to <researcher> instead of creating one.",
+)
+@click.option(
+    "--status", is_flag=True, default=False,
+    help="Show the binding state for <researcher> without modifying anything.",
+)
+@click.pass_context
+def agent_assistant(
+    ctx: click.Context,
+    team: str,
+    researcher: str,
+    remove: bool,
+    status: bool,
+) -> None:
+    """Manage the researcher_assistant bound to a researcher.
+
+    Without flags: creates ``<researcher>_assistant`` (role:
+    researcher_assistant, model: haiku) and binds it to RESEARCHER.
+    Use this to backfill assistants on teams whose researchers were
+    created before the auto-spawn feature.
+
+    --remove: tear down the existing assistant.
+
+    --status: print the current binding state.
+    """
+    from delegate.bootstrap import (
+        add_assistant_for_researcher,
+        remove_assistant_for_researcher,
+        _agents_dir,
+    )
+    from delegate.fmt import success
+    import yaml as _yaml
+
+    hc_home = _get_home(ctx)
+
+    if status:
+        researcher_dir = _agents_dir(hc_home, team) / researcher
+        if not researcher_dir.is_dir():
+            raise click.ClickException(
+                f"Agent '{researcher}' does not exist on team '{team}'"
+            )
+        state_path = researcher_dir / "state.yaml"
+        state = _yaml.safe_load(state_path.read_text()) or {}
+        role = state.get("role", "?")
+        helper = state.get("assistant")
+        click.echo(f"researcher: {researcher} (role: {role})")
+        if helper:
+            click.echo(f"assistant:  {helper} (role: researcher_assistant)")
+        else:
+            click.echo("assistant:  (none)")
+        return
+
+    if remove:
+        try:
+            removed = remove_assistant_for_researcher(hc_home, team, researcher)
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(str(exc))
+        if removed:
+            success(f"Removed assistant '{removed}' from researcher '{researcher}'")
+        else:
+            click.echo(f"Researcher '{researcher}' has no assistant — nothing to remove")
+        return
+
+    try:
+        helper_name = add_assistant_for_researcher(hc_home, team, researcher)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc))
+    success(
+        f"Created assistant '{helper_name}' for researcher '{researcher}' "
+        f"(role: researcher_assistant, model: haiku)"
+    )
 
 
 # ──────────────────────────────────────────────────────────────
