@@ -1544,15 +1544,17 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     # --- Config endpoint ---
 
     @app.get("/config")
-    def get_config():
+    async def get_config():
         """Return app configuration (human member, etc.) for the frontend."""
-        human = get_default_human(hc_home)
-        return {
-            "boss_name": human,  # backward compat
-            "human_name": human,
-            "hc_home": str(hc_home),
-            "bootstrap_id": _get_bootstrap_id(hc_home),
-        }
+        def _impl():
+            human = get_default_human(hc_home)
+            return {
+                "boss_name": human,  # backward compat
+                "human_name": human,
+                "hc_home": str(hc_home),
+                "bootstrap_id": _get_bootstrap_id(hc_home),
+            }
+        return await _run_in_db_pool(_impl)
 
     # --- Bootstrap endpoint (all initial data in one call) ---
 
@@ -1612,215 +1614,244 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             conn.close()
 
     @app.get("/bootstrap")
-    def bootstrap(team: str | None = None):
+    async def bootstrap(team: str | None = None):
         """Return config + teams + first team's data in one request.
 
         Eliminates the waterfall of sequential fetches on initial page load.
         The frontend calls this once instead of /config → /teams → /tasks + /agents + /messages + /stats.
         """
-        human = get_default_human(hc_home)
-        team_list = _get_teams_list()
+        def _impl():
+            human = get_default_human(hc_home)
+            team_list = _get_teams_list()
 
-        # Determine which team to load initial data for
-        team_names = [t["name"] for t in team_list]
-        initial_team = None
-        if team and team in team_names:
-            initial_team = team
-        elif team_names:
-            initial_team = team_names[0]
+            # Determine which team to load initial data for
+            team_names = [t["name"] for t in team_list]
+            initial_team = None
+            if team and team in team_names:
+                initial_team = team
+            elif team_names:
+                initial_team = team_names[0]
 
-        result = {
-            "config": {
-                "boss_name": human,
-                "human_name": human,
-                "hc_home": str(hc_home),
-                "bootstrap_id": _get_bootstrap_id(hc_home),
-            },
-            "teams": team_list,
-            "initial_team": initial_team,
-        }
-
-        if initial_team:
-            agents_data = _list_team_agents(hc_home, initial_team)
-
-            # Batch agent stats: single GROUP BY query + single list_tasks
-            # instead of N separate connections
-            agent_names = [a["name"] for a in agents_data]
-            agent_stats = _get_team_agent_stats(hc_home, initial_team, agent_names)
-
-            tasks_data = _list_tasks(hc_home, initial_team)
-            messages_data = _get_messages(hc_home, initial_team, limit=100)
-
-            from delegate.config import get_reviewer_config, get_auto_approver_config, get_task_freeze_config, get_max_tasks_config
-            reviewer_cfg = get_reviewer_config(hc_home, initial_team)
-            result["initial_data"] = {
-                "tasks": tasks_data,
-                "agents": agents_data,
-                "agent_stats": agent_stats,
-                "messages": messages_data,
-                "reviewer": reviewer_cfg,
-                "auto_approver": get_auto_approver_config(hc_home, initial_team),  # compat
-                "task_freeze": get_task_freeze_config(hc_home, initial_team),
-                "max_tasks": get_max_tasks_config(hc_home, initial_team),
+            result = {
+                "config": {
+                    "boss_name": human,
+                    "human_name": human,
+                    "hc_home": str(hc_home),
+                    "bootstrap_id": _get_bootstrap_id(hc_home),
+                },
+                "teams": team_list,
+                "initial_team": initial_team,
             }
 
-        return result
+            if initial_team:
+                agents_data = _list_team_agents(hc_home, initial_team)
+
+                # Batch agent stats: single GROUP BY query + single list_tasks
+                # instead of N separate connections
+                agent_names = [a["name"] for a in agents_data]
+                agent_stats = _get_team_agent_stats(hc_home, initial_team, agent_names)
+
+                tasks_data = _list_tasks(hc_home, initial_team)
+                messages_data = _get_messages(hc_home, initial_team, limit=100)
+
+                from delegate.config import get_reviewer_config, get_auto_approver_config, get_task_freeze_config, get_max_tasks_config
+                reviewer_cfg = get_reviewer_config(hc_home, initial_team)
+                result["initial_data"] = {
+                    "tasks": tasks_data,
+                    "agents": agents_data,
+                    "agent_stats": agent_stats,
+                    "messages": messages_data,
+                    "reviewer": reviewer_cfg,
+                    "auto_approver": get_auto_approver_config(hc_home, initial_team),  # compat
+                    "task_freeze": get_task_freeze_config(hc_home, initial_team),
+                    "max_tasks": get_max_tasks_config(hc_home, initial_team),
+                }
+
+            return result
+        return await _run_in_db_pool(_impl)
 
     # --- Team endpoints ---
 
     @app.get("/teams")
-    def get_teams():
+    async def get_teams():
         """List all teams with metadata from the global DB.
 
         Returns: List of team objects with name, team_id, created_at, agent_count, task_count
         """
-        return _get_teams_list()
+        return await _run_in_db_pool(_get_teams_list)
 
     # --- Reviewer endpoints ---
 
     @app.get("/teams/{team}/reviewer")
-    def get_reviewer(team: str):
+    async def get_reviewer(team: str):
         """Return the reviewer config for a team."""
-        from delegate.config import get_reviewer_config
-        return get_reviewer_config(hc_home, team)
+        def _impl():
+            from delegate.config import get_reviewer_config
+            return get_reviewer_config(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/reviewer")
-    def post_reviewer(team: str, body: dict):
+    async def post_reviewer(team: str, body: dict):
         """Update reviewer config (mode, threshold, model, auto_merge)."""
-        from delegate.config import update_reviewer_config
-        kwargs = {}
-        if "mode" in body:
-            kwargs["mode"] = str(body["mode"])
-        if "threshold" in body:
-            kwargs["threshold"] = float(body["threshold"])
-        if "model" in body:
-            kwargs["model"] = str(body["model"])
-        if "auto_merge" in body:
-            kwargs["auto_merge"] = bool(body["auto_merge"])
-        return update_reviewer_config(hc_home, team, **kwargs)
+        def _impl():
+            from delegate.config import update_reviewer_config
+            kwargs = {}
+            if "mode" in body:
+                kwargs["mode"] = str(body["mode"])
+            if "threshold" in body:
+                kwargs["threshold"] = float(body["threshold"])
+            if "model" in body:
+                kwargs["model"] = str(body["model"])
+            if "auto_merge" in body:
+                kwargs["auto_merge"] = bool(body["auto_merge"])
+            return update_reviewer_config(hc_home, team, **kwargs)
+        return await _run_in_db_pool(_impl)
 
     # --- Auto-approver endpoints (deprecated — kept for backwards compat) ---
 
     @app.get("/teams/{team}/auto-approver")
-    def get_auto_approver(team: str):
+    async def get_auto_approver(team: str):
         """**Deprecated** — use /teams/{team}/reviewer instead."""
-        from delegate.config import get_auto_approver_config
-        return get_auto_approver_config(hc_home, team)
+        def _impl():
+            from delegate.config import get_auto_approver_config
+            return get_auto_approver_config(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/auto-approver")
-    def post_auto_approver(team: str, body: dict):
+    async def post_auto_approver(team: str, body: dict):
         """**Deprecated** — use /teams/{team}/reviewer instead."""
-        from delegate.config import update_auto_approver_config
-        kwargs = {}
-        if "enabled" in body:
-            kwargs["enabled"] = bool(body["enabled"])
-        if "threshold" in body:
-            kwargs["threshold"] = float(body["threshold"])
-        if "model" in body:
-            kwargs["model"] = str(body["model"])
-        return update_auto_approver_config(hc_home, team, **kwargs)
+        def _impl():
+            from delegate.config import update_auto_approver_config
+            kwargs = {}
+            if "enabled" in body:
+                kwargs["enabled"] = bool(body["enabled"])
+            if "threshold" in body:
+                kwargs["threshold"] = float(body["threshold"])
+            if "model" in body:
+                kwargs["model"] = str(body["model"])
+            return update_auto_approver_config(hc_home, team, **kwargs)
+        return await _run_in_db_pool(_impl)
 
     # --- Task-freeze endpoints ---
 
     @app.get("/teams/{team}/task-freeze")
-    def get_task_freeze(team: str):
+    async def get_task_freeze(team: str):
         """Return the task-freeze config for a team."""
-        from delegate.config import get_task_freeze_config
-        return get_task_freeze_config(hc_home, team)
+        def _impl():
+            from delegate.config import get_task_freeze_config
+            return get_task_freeze_config(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/task-freeze")
-    def post_task_freeze(team: str, body: dict):
+    async def post_task_freeze(team: str, body: dict):
         """Update task-freeze config (enabled)."""
-        from delegate.config import update_task_freeze_config
-        kwargs = {}
-        if "enabled" in body:
-            kwargs["enabled"] = bool(body["enabled"])
-        return update_task_freeze_config(hc_home, team, **kwargs)
+        def _impl():
+            from delegate.config import update_task_freeze_config
+            kwargs = {}
+            if "enabled" in body:
+                kwargs["enabled"] = bool(body["enabled"])
+            return update_task_freeze_config(hc_home, team, **kwargs)
+        return await _run_in_db_pool(_impl)
 
     # --- Max-tasks limit endpoints ---
 
     @app.get("/teams/{team}/max-tasks")
-    def get_max_tasks(team: str):
+    async def get_max_tasks(team: str):
         """Return the max-tasks config for a team."""
-        from delegate.config import get_max_tasks_config
-        return get_max_tasks_config(hc_home, team)
+        def _impl():
+            from delegate.config import get_max_tasks_config
+            return get_max_tasks_config(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/max-tasks")
-    def post_max_tasks(team: str, body: dict):
+    async def post_max_tasks(team: str, body: dict):
         """Update max-tasks config (enabled, limit_in_progress, limit_queued)."""
-        from delegate.config import update_max_tasks_config
-        kwargs = {}
-        if "enabled" in body:
-            kwargs["enabled"] = bool(body["enabled"])
-        if "limit_in_progress" in body:
-            kwargs["limit_in_progress"] = int(body["limit_in_progress"])
-        if "limit_queued" in body:
-            kwargs["limit_queued"] = int(body["limit_queued"])
-        return update_max_tasks_config(hc_home, team, **kwargs)
+        def _impl():
+            from delegate.config import update_max_tasks_config
+            kwargs = {}
+            if "enabled" in body:
+                kwargs["enabled"] = bool(body["enabled"])
+            if "limit_in_progress" in body:
+                kwargs["limit_in_progress"] = int(body["limit_in_progress"])
+            if "limit_queued" in body:
+                kwargs["limit_queued"] = int(body["limit_queued"])
+            return update_max_tasks_config(hc_home, team, **kwargs)
+        return await _run_in_db_pool(_impl)
 
     # --- Workflow endpoints (team-scoped) ---
 
     @app.get("/teams/{team}/workflows")
-    def get_team_workflows(team: str):
+    async def get_team_workflows(team: str):
         """List all registered workflows for a team."""
-        from delegate.workflow import list_workflows as _list_wf
-        return _list_wf(hc_home, team)
+        def _impl():
+            from delegate.workflow import list_workflows as _list_wf
+            return _list_wf(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/workflows/{name}")
-    def get_team_workflow(team: str, name: str, version: int | None = None):
+    async def get_team_workflow(team: str, name: str, version: int | None = None):
         """Get a specific workflow definition."""
-        from delegate.workflow import load_workflow, get_latest_version
+        def _impl():
+            from delegate.workflow import load_workflow, get_latest_version
 
-        if version is None:
-            version = get_latest_version(hc_home, team, name)
-            if version is None:
-                raise HTTPException(404, f"Workflow '{name}' not found for team '{team}'")
+            v = version
+            if v is None:
+                v = get_latest_version(hc_home, team, name)
+                if v is None:
+                    raise HTTPException(404, f"Workflow '{name}' not found for team '{team}'")
 
-        try:
-            wf = load_workflow(hc_home, team, name, version)
-        except (FileNotFoundError, ValueError) as exc:
-            raise HTTPException(404, str(exc))
+            try:
+                wf = load_workflow(hc_home, team, name, v)
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(404, str(exc))
 
-        return {
-            "name": wf.name,
-            "version": wf.version,
-            "stages": [
-                {
-                    "key": cls._key,
-                    "label": cls.label,
-                    "terminal": cls.terminal,
-                    "auto": cls.auto,
-                }
-                for cls in wf.stages
-            ],
-            "transitions": {k: sorted(v) for k, v in wf.transitions.items()},
-            "initial": wf.initial_stage,
-            "terminals": sorted(wf.terminal_stages),
-        }
+            return {
+                "name": wf.name,
+                "version": wf.version,
+                "stages": [
+                    {
+                        "key": cls._key,
+                        "label": cls.label,
+                        "terminal": cls.terminal,
+                        "auto": cls.auto,
+                    }
+                    for cls in wf.stages
+                ],
+                "transitions": {k: sorted(v) for k, v in wf.transitions.items()},
+                "initial": wf.initial_stage,
+                "terminals": sorted(wf.terminal_stages),
+            }
+        return await _run_in_db_pool(_impl)
 
     # --- Task endpoints (team-scoped) ---
 
     @app.get("/teams/{team}/tasks")
-    def get_team_tasks(team: str, status: str | None = None, assignee: str | None = None):
-        return _list_tasks(hc_home, team, status=status, assignee=assignee)
+    async def get_team_tasks(team: str, status: str | None = None, assignee: str | None = None):
+        def _impl():
+            return _list_tasks(hc_home, team, status=status, assignee=assignee)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/tasks/merge-order")
-    def get_merge_order(team: str):
-        from delegate.merge import _sort_merge_candidates
-        all_approval = _list_tasks(hc_home, team, status="in_approval")
-        sorted_tasks = _sort_merge_candidates(hc_home, team, all_approval)
-        return {"order": [t["id"] for t in sorted_tasks]}
+    async def get_merge_order(team: str):
+        def _impl():
+            from delegate.merge import _sort_merge_candidates
+            all_approval = _list_tasks(hc_home, team, status="in_approval")
+            sorted_tasks = _sort_merge_candidates(hc_home, team, all_approval)
+            return {"order": [t["id"] for t in sorted_tasks]}
+        return await _run_in_db_pool(_impl)
 
     # --- Message endpoints (team-scoped) ---
 
     @app.get("/teams/{team}/messages")
-    def get_team_messages(team: str, since: str | None = None, between: str | None = None, type: str | None = None, limit: int | None = None, before_id: int | None = None):
-        between_tuple = None
-        if between:
-            parts = [p.strip() for p in between.split(",")]
-            if len(parts) == 2:
-                between_tuple = (parts[0], parts[1])
-        return _get_messages(hc_home, team, since=since, between=between_tuple, msg_type=type, limit=limit, before_id=before_id)
+    async def get_team_messages(team: str, since: str | None = None, between: str | None = None, type: str | None = None, limit: int | None = None, before_id: int | None = None):
+        def _impl():
+            between_tuple = None
+            if between:
+                parts = [p.strip() for p in between.split(",")]
+                if len(parts) == 2:
+                    between_tuple = (parts[0], parts[1])
+            return _get_messages(hc_home, team, since=since, between=between_tuple, msg_type=type, limit=limit, before_id=before_id)
+        return await _run_in_db_pool(_impl)
 
     class SendMessage(BaseModel):
         team: str | None = None
@@ -1828,22 +1859,24 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         content: str
 
     @app.post("/teams/{team}/messages")
-    def post_team_message(team: str, msg: SendMessage):
+    async def post_team_message(team: str, msg: SendMessage):
         """Human sends a message to any agent in the team."""
-        human_name = get_default_human(hc_home)
-        team_agents = _list_team_agents(hc_home, team)
-        agent_names = {a["name"] for a in team_agents}
-        if msg.recipient not in agent_names:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
-            )
-        _send(hc_home, team, human_name, msg.recipient, msg.content)
-        _wake_daemon()
-        return {"status": "queued"}
+        def _impl():
+            human_name = get_default_human(hc_home)
+            team_agents = _list_team_agents(hc_home, team)
+            agent_names = {a["name"] for a in team_agents}
+            if msg.recipient not in agent_names:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
+                )
+            _send(hc_home, team, human_name, msg.recipient, msg.content)
+            _wake_daemon()
+            return {"status": "queued"}
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/greet")
-    def greet_team(team: str, last_seen: str | None = None):
+    async def greet_team(team: str, last_seen: str | None = None):
         """Send a welcome greeting from the team's manager to the human.
         Called by the frontend after meaningful absence (30+ min).
 
@@ -1853,92 +1886,94 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         Args:
             last_seen: ISO timestamp of when user was last active (optional)
         """
-        from delegate.bootstrap import get_member_by_role
-        from delegate.mailbox import read_inbox
-        from delegate.repo import list_repos
+        def _impl():
+            from delegate.bootstrap import get_member_by_role
+            from delegate.mailbox import read_inbox
+            from delegate.repo import list_repos
 
-        human_name = get_default_human(hc_home)
-        manager_name = get_member_by_role(hc_home, team, "manager")
+            human_name = get_default_human(hc_home)
+            manager_name = get_member_by_role(hc_home, team, "manager")
 
-        if not manager_name:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No manager found for team '{team}'",
+            if not manager_name:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No manager found for team '{team}'",
+                )
+
+            now_utc = datetime.now(timezone.utc)
+
+            # ── First-run detection (legacy fallback) ──
+            # For projects created via the UI, the first-run welcome is sent
+            # during POST /projects.  This path is a fallback for CLI-bootstrapped
+            # teams or old installs where no welcome was sent at creation time.
+            try:
+                all_messages = _get_messages(hc_home, team, limit=1)
+                is_first_run = len(all_messages) == 0
+            except Exception:
+                is_first_run = False
+
+            if is_first_run:
+                # Count AI agents (excluding manager)
+                ai_agents = [
+                    a for a in _list_team_agents(hc_home, team)
+                    if a.get("role") != "manager"
+                ]
+                has_repos = bool(list_repos(hc_home, team))
+
+                greeting = _build_first_run_greeting(
+                    hc_home, team, manager_name, human_name,
+                    agent_count=len(ai_agents),
+                    has_repos=has_repos,
+                )
+                _send(hc_home, team, manager_name, human_name, greeting)
+                logger.info(
+                    "First-run welcome sent by %s to %s | team=%s | agents=%d | repos=%s",
+                    manager_name, human_name, team,
+                    len(ai_agents), has_repos,
+                )
+                return {"status": "sent"}
+
+            # ── Regular greeting ──
+            # Check if manager sent a message to human in the last 15 minutes
+            # If so, skip the greeting to avoid noise
+            try:
+                recent_messages = read_inbox(hc_home, team, human_name, unread_only=False)
+                cutoff = now_utc - timedelta(minutes=15)
+                recent_manager_msg = any(
+                    m.sender == manager_name and
+                    datetime.fromisoformat(m.time.replace("Z", "+00:00")) > cutoff
+                    for m in recent_messages
+                )
+                if recent_manager_msg:
+                    logger.info(
+                        "Skipping greeting — manager %s sent message to %s in last 15 min | team=%s",
+                        manager_name, human_name, team,
+                    )
+                    return {"status": "skipped"}
+            except Exception:
+                pass  # If we can't check, proceed with greeting
+
+            # Parse last_seen if provided
+            last_seen_dt = None
+            if last_seen:
+                try:
+                    last_seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+
+            greeting = _build_greeting(hc_home, team, manager_name, human_name, now_utc, last_seen_dt)
+            _send(
+                hc_home, team,
+                manager_name,
+                human_name,
+                greeting,
             )
-
-        now_utc = datetime.now(timezone.utc)
-
-        # ── First-run detection (legacy fallback) ──
-        # For projects created via the UI, the first-run welcome is sent
-        # during POST /projects.  This path is a fallback for CLI-bootstrapped
-        # teams or old installs where no welcome was sent at creation time.
-        try:
-            all_messages = _get_messages(hc_home, team, limit=1)
-            is_first_run = len(all_messages) == 0
-        except Exception:
-            is_first_run = False
-
-        if is_first_run:
-            # Count AI agents (excluding manager)
-            ai_agents = [
-                a for a in _list_team_agents(hc_home, team)
-                if a.get("role") != "manager"
-            ]
-            has_repos = bool(list_repos(hc_home, team))
-
-            greeting = _build_first_run_greeting(
-                hc_home, team, manager_name, human_name,
-                agent_count=len(ai_agents),
-                has_repos=has_repos,
-            )
-            _send(hc_home, team, manager_name, human_name, greeting)
             logger.info(
-                "First-run welcome sent by %s to %s | team=%s | agents=%d | repos=%s",
-                manager_name, human_name, team,
-                len(ai_agents), has_repos,
+                "Manager %s sent greeting to %s | team=%s | last_seen=%s",
+                manager_name, human_name, team, last_seen or "none",
             )
             return {"status": "sent"}
-
-        # ── Regular greeting ──
-        # Check if manager sent a message to human in the last 15 minutes
-        # If so, skip the greeting to avoid noise
-        try:
-            recent_messages = read_inbox(hc_home, team, human_name, unread_only=False)
-            cutoff = now_utc - timedelta(minutes=15)
-            recent_manager_msg = any(
-                m.sender == manager_name and
-                datetime.fromisoformat(m.time.replace("Z", "+00:00")) > cutoff
-                for m in recent_messages
-            )
-            if recent_manager_msg:
-                logger.info(
-                    "Skipping greeting — manager %s sent message to %s in last 15 min | team=%s",
-                    manager_name, human_name, team,
-                )
-                return {"status": "skipped"}
-        except Exception:
-            pass  # If we can't check, proceed with greeting
-
-        # Parse last_seen if provided
-        last_seen_dt = None
-        if last_seen:
-            try:
-                last_seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-            except Exception:
-                pass
-
-        greeting = _build_greeting(hc_home, team, manager_name, human_name, now_utc, last_seen_dt)
-        _send(
-            hc_home, team,
-            manager_name,
-            human_name,
-            greeting,
-        )
-        logger.info(
-            "Manager %s sent greeting to %s | team=%s | last_seen=%s",
-            manager_name, human_name, team, last_seen or "none",
-        )
-        return {"status": "sent"}
+        return await _run_in_db_pool(_impl)
 
     # --- File upload endpoints ---
 
@@ -2023,7 +2058,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         return {"uploaded": uploaded}
 
     @app.get("/teams/{team}/uploads/{year}/{month}/{filename}")
-    def serve_file(team: str, year: str, month: str, filename: str):
+    async def serve_file(team: str, year: str, month: str, filename: str):
         """Serve an uploaded file with appropriate headers.
 
         Args:
@@ -2039,136 +2074,140 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             403: Path traversal attempt
             404: File not found
         """
-        from delegate.uploads import safe_path
+        def _impl():
+            from delegate.uploads import safe_path
 
-        uploads_dir = _team_dir(hc_home, team) / "uploads"
-        user_path = f"{year}/{month}/{filename}"
+            uploads_dir = _team_dir(hc_home, team) / "uploads"
+            user_path = f"{year}/{month}/{filename}"
 
-        # Validate path (prevent traversal)
-        file_path = safe_path(uploads_dir, user_path)
-        if file_path is None:
-            raise HTTPException(status_code=403, detail="Invalid path")
+            # Validate path (prevent traversal)
+            file_path = safe_path(uploads_dir, user_path)
+            if file_path is None:
+                raise HTTPException(status_code=403, detail="Invalid path")
 
-        if not file_path.is_file():
-            raise HTTPException(status_code=404, detail="File not found")
+            if not file_path.is_file():
+                raise HTTPException(status_code=404, detail="File not found")
 
-        # Detect MIME type
-        mime_type, _ = mimetypes.guess_type(filename)
-        if mime_type is None:
-            mime_type = "application/octet-stream"
+            # Detect MIME type
+            mime_type, _ = mimetypes.guess_type(filename)
+            if mime_type is None:
+                mime_type = "application/octet-stream"
 
-        # Determine Content-Disposition
-        # SVG: force download (XSS prevention)
-        # Images/PDF: inline (show in browser)
-        # Others: attachment (download)
-        if filename.lower().endswith(".svg"):
-            content_disposition = f'attachment; filename="{filename}"'
-        elif mime_type.startswith("image/") or mime_type == "application/pdf":
-            content_disposition = "inline"
-        else:
-            content_disposition = f'attachment; filename="{filename}"'
+            # Determine Content-Disposition
+            # SVG: force download (XSS prevention)
+            # Images/PDF: inline (show in browser)
+            # Others: attachment (download)
+            if filename.lower().endswith(".svg"):
+                content_disposition = f'attachment; filename="{filename}"'
+            elif mime_type.startswith("image/") or mime_type == "application/pdf":
+                content_disposition = "inline"
+            else:
+                content_disposition = f'attachment; filename="{filename}"'
 
-        # Read file content
-        with file_path.open("rb") as f:
-            content = f.read()
+            # Read file content
+            with file_path.open("rb") as f:
+                content = f.read()
 
-        # Build response with security headers
-        headers = {
-            "Content-Type": mime_type,
-            "Content-Disposition": content_disposition,
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "public, max-age=86400",
-        }
+            # Build response with security headers
+            headers = {
+                "Content-Type": mime_type,
+                "Content-Disposition": content_disposition,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "public, max-age=86400",
+            }
 
-        # SVG: add CSP header
-        if filename.lower().endswith(".svg"):
-            headers["Content-Security-Policy"] = "default-src 'none'"
+            # SVG: add CSP header
+            if filename.lower().endswith(".svg"):
+                headers["Content-Security-Policy"] = "default-src 'none'"
 
-        return Response(content=content, headers=headers, media_type=mime_type)
+            return Response(content=content, headers=headers, media_type=mime_type)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/cost-summary")
-    def get_cost_summary(team: str):
+    async def get_cost_summary(team: str):
         """Return cost analytics: today, this week, and top tasks by cost."""
-        from delegate.db import get_connection
-        t = _resolve_team(hc_home, team)
-        conn = get_connection(hc_home, team)
-        # Use local timezone for day/week boundaries so "today" and "this week"
-        # reflect the user's local calendar day, not UTC.
-        now_local = datetime.now().astimezone()
+        def _impl():
+            from delegate.db import get_connection
+            t = _resolve_team(hc_home, team)
+            conn = get_connection(hc_home, team)
+            # Use local timezone for day/week boundaries so "today" and "this week"
+            # reflect the user's local calendar day, not UTC.
+            now_local = datetime.now().astimezone()
 
-        # Today: midnight in local time, converted to UTC for comparison
-        midnight_today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        midnight_today_utc = midnight_today_local.astimezone(timezone.utc)
+            # Today: midnight in local time, converted to UTC for comparison
+            midnight_today_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            midnight_today_utc = midnight_today_local.astimezone(timezone.utc)
 
-        # This week: Monday 00:00 local time, converted to UTC
-        days_since_monday = now_local.weekday()
-        monday_this_week_local = (now_local - timedelta(days=days_since_monday)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        monday_this_week_utc = monday_this_week_local.astimezone(timezone.utc)
+            # This week: Monday 00:00 local time, converted to UTC
+            days_since_monday = now_local.weekday()
+            monday_this_week_local = (now_local - timedelta(days=days_since_monday)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            monday_this_week_utc = monday_this_week_local.astimezone(timezone.utc)
 
-        # Query today
-        today_rows = conn.execute("""
-            SELECT
-                COALESCE(SUM(cost_usd), 0) as total_cost,
-                COUNT(DISTINCT task_id) as task_count
-            FROM sessions
-            WHERE started_at >= ? AND project_uuid = ?
-        """, (midnight_today_utc.isoformat(), t)).fetchone()
+            # Query today
+            today_rows = conn.execute("""
+                SELECT
+                    COALESCE(SUM(cost_usd), 0) as total_cost,
+                    COUNT(DISTINCT task_id) as task_count
+                FROM sessions
+                WHERE started_at >= ? AND project_uuid = ?
+            """, (midnight_today_utc.isoformat(), t)).fetchone()
 
-        today_cost = today_rows[0] or 0.0
-        today_task_count = today_rows[1] or 0
-        today_avg = today_cost / today_task_count if today_task_count > 0 else 0.0
+            today_cost = today_rows[0] or 0.0
+            today_task_count = today_rows[1] or 0
+            today_avg = today_cost / today_task_count if today_task_count > 0 else 0.0
 
-        # Query this week
-        week_rows = conn.execute("""
-            SELECT
-                COALESCE(SUM(cost_usd), 0) as total_cost,
-                COUNT(DISTINCT task_id) as task_count
-            FROM sessions
-            WHERE started_at >= ? AND project_uuid = ?
-        """, (monday_this_week_utc.isoformat(), t)).fetchone()
+            # Query this week
+            week_rows = conn.execute("""
+                SELECT
+                    COALESCE(SUM(cost_usd), 0) as total_cost,
+                    COUNT(DISTINCT task_id) as task_count
+                FROM sessions
+                WHERE started_at >= ? AND project_uuid = ?
+            """, (monday_this_week_utc.isoformat(), t)).fetchone()
 
-        week_cost = week_rows[0] or 0.0
-        week_task_count = week_rows[1] or 0
-        week_avg = week_cost / week_task_count if week_task_count > 0 else 0.0
+            week_cost = week_rows[0] or 0.0
+            week_task_count = week_rows[1] or 0
+            week_avg = week_cost / week_task_count if week_task_count > 0 else 0.0
 
-        # Top 3 tasks by total cost (all time)
-        top_tasks_rows = conn.execute("""
-            SELECT
-                s.task_id,
-                t.title,
-                SUM(s.cost_usd) as total_cost
-            FROM sessions s
-            LEFT JOIN tasks t ON s.task_id = t.id
-            WHERE s.task_id IS NOT NULL AND s.project_uuid = ?
-            GROUP BY s.task_id
-            ORDER BY total_cost DESC
-            LIMIT 3
-        """, (t,)).fetchall()
+            # Top 3 tasks by total cost (all time)
+            top_tasks_rows = conn.execute("""
+                SELECT
+                    s.task_id,
+                    t.title,
+                    SUM(s.cost_usd) as total_cost
+                FROM sessions s
+                LEFT JOIN tasks t ON s.task_id = t.id
+                WHERE s.task_id IS NOT NULL AND s.project_uuid = ?
+                GROUP BY s.task_id
+                ORDER BY total_cost DESC
+                LIMIT 3
+            """, (t,)).fetchall()
 
-        top_tasks = [
-            {
-                "task_id": row[0],
-                "title": row[1] or f"Task {row[0]}",
-                "cost_usd": row[2] or 0.0,
+            top_tasks = [
+                {
+                    "task_id": row[0],
+                    "title": row[1] or f"Task {row[0]}",
+                    "cost_usd": row[2] or 0.0,
+                }
+                for row in top_tasks_rows
+            ]
+
+            return {
+                "today": {
+                    "total_cost_usd": round(today_cost, 2),
+                    "task_count": today_task_count,
+                    "avg_cost_per_task": round(today_avg, 2),
+                },
+                "this_week": {
+                    "total_cost_usd": round(week_cost, 2),
+                    "task_count": week_task_count,
+                    "avg_cost_per_task": round(week_avg, 2),
+                },
+                "top_tasks": top_tasks,
             }
-            for row in top_tasks_rows
-        ]
-
-        return {
-            "today": {
-                "total_cost_usd": round(today_cost, 2),
-                "task_count": today_task_count,
-                "avg_cost_per_task": round(today_avg, 2),
-            },
-            "this_week": {
-                "total_cost_usd": round(week_cost, 2),
-                "task_count": week_task_count,
-                "avg_cost_per_task": round(week_avg, 2),
-            },
-            "top_tasks": top_tasks,
-        }
+        return await _run_in_db_pool(_impl)
 
     # --- Magic commands endpoints ---
 
@@ -2179,21 +2218,23 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         bio: str | None = None
 
     @app.post("/teams/{team}/agents/add")
-    def add_agent_endpoint(team: str, req: AddAgentRequest):
-        from delegate.bootstrap import add_agent
-        kwargs = {"hc_home": hc_home, "team_name": team, "agent_name": req.name}
-        if req.role is not None:
-            kwargs["role"] = req.role
-        if req.model is not None:
-            kwargs["model"] = req.model
-        if req.bio is not None:
-            kwargs["bio"] = req.bio
-        try:
-            agent_name = add_agent(**kwargs)
-        except (FileNotFoundError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        resolved_model = req.model or "sonnet"
-        return {"message": f"Added agent '{agent_name}' to team '{team}' (role: {req.role or 'engineer'}, model: {resolved_model})"}
+    async def add_agent_endpoint(team: str, req: AddAgentRequest):
+        def _impl():
+            from delegate.bootstrap import add_agent
+            kwargs = {"hc_home": hc_home, "team_name": team, "agent_name": req.name}
+            if req.role is not None:
+                kwargs["role"] = req.role
+            if req.model is not None:
+                kwargs["model"] = req.model
+            if req.bio is not None:
+                kwargs["bio"] = req.bio
+            try:
+                agent_name = add_agent(**kwargs)
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            resolved_model = req.model or "sonnet"
+            return {"message": f"Added agent '{agent_name}' to team '{team}' (role: {req.role or 'engineer'}, model: {resolved_model})"}
+        return await _run_in_db_pool(_impl)
 
     # --- Project (team) creation from UI ---
 
@@ -2269,7 +2310,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         model: str = "sonnet"
 
     @app.post("/projects")
-    def create_project(req: CreateProjectRequest):
+    async def create_project(req: CreateProjectRequest):
         """Create a new project (team) from the UI.
 
         Bootstraps the team, registers the repo, and installs the default
@@ -2279,227 +2320,241 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         All validation is performed upfront before any side effects.  If
         a later step fails, partial state is rolled back (best-effort).
         """
-        from delegate.bootstrap import bootstrap, validate_project_name
-        from delegate.repo import register_repo
-        from delegate.activity import broadcast_teams_refresh
+        def _impl():
+            from delegate.bootstrap import bootstrap, validate_project_name
+            from delegate.repo import register_repo
+            from delegate.activity import broadcast_teams_refresh
 
-        name = req.name.strip()
-        repo_path = str(Path(req.repo_path).expanduser())
-        resolved_repo = Path(repo_path).resolve()
+            name = req.name.strip()
+            repo_path = str(Path(req.repo_path).expanduser())
+            resolved_repo = Path(repo_path).resolve()
 
-        # ── Phase 1: Validate everything BEFORE creating anything ──
+            # ── Phase 1: Validate everything BEFORE creating anything ──
 
-        # 1a. Name format
-        try:
-            validate_project_name(name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-        # 1b. Repo path exists
-        if not resolved_repo.is_dir():
-            raise HTTPException(status_code=400, detail=f"Repository path does not exist: {req.repo_path}")
-
-        # 1c. Repo is a git repository
-        if not (resolved_repo / ".git").exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Not a git repository (no .git directory): {req.repo_path}",
-            )
-
-        # 1d. No duplicate project name
-        from delegate.db import get_connection
-        conn = get_connection(hc_home)
-        try:
-            existing = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
-        finally:
-            conn.close()
-        if existing:
-            raise HTTPException(status_code=409, detail=f"Project '{name}' already exists")
-
-        # ── Phase 2: Create (with rollback on failure) ──
-
-        # Generate agent names using friendly name pool
-        exclude = {"delegate"}
-        human = get_default_human(hc_home)
-        if human:
-            exclude.add(human)
-        generated = pick_names(req.agent_count, exclude=exclude)
-        agent_list = [(n, "engineer") for n in generated]
-
-        # Bootstrap
-        models_dict = {"*": req.model} if req.model in ("opus", "sonnet") else None
-        try:
-            bootstrap(hc_home, team_name=name, agents=agent_list, models=models_dict)
-        except (ValueError, FileExistsError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-        # From here on, if anything fails we must clean up the bootstrapped team.
-        try:
-            # Register repo
-            register_repo(hc_home, name, repo_path)
-
-            # Register default workflow (non-critical)
+            # 1a. Name format
             try:
-                from delegate.workflow import register_workflow, get_latest_version
-                builtin = Path(__file__).parent / "workflows" / "default.py"
-                if builtin.is_file() and get_latest_version(hc_home, name, "default") is None:
-                    register_workflow(hc_home, name, builtin)
-            except Exception:
-                logger.warning("Could not register default workflow for project '%s'", name, exc_info=True)
+                validate_project_name(name)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
-            # Send first-run welcome greeting (non-critical)
-            try:
-                from delegate.bootstrap import get_member_by_role
-                from delegate.repo import list_repos as _list_repos_fn
+            # 1b. Repo path exists
+            if not resolved_repo.is_dir():
+                raise HTTPException(status_code=400, detail=f"Repository path does not exist: {req.repo_path}")
 
-                manager_name = get_member_by_role(hc_home, name, "manager")
-                human_name = get_default_human(hc_home)
-                if manager_name and human_name:
-                    ai_agents = [
-                        a for a in _list_team_agents(hc_home, name)
-                        if a.get("role") != "manager"
-                    ]
-                    greeting = _build_first_run_greeting(
-                        hc_home, name, manager_name, human_name,
-                        agent_count=len(ai_agents),
-                        has_repos=bool(_list_repos_fn(hc_home, name)),
-                    )
-                    _send(hc_home, name, manager_name, human_name, greeting)
-                    logger.info(
-                        "First-run welcome sent during project creation | team=%s",
-                        name,
-                    )
-            except Exception:
-                logger.warning(
-                    "Could not send first-run greeting for project '%s'",
-                    name, exc_info=True,
+            # 1c. Repo is a git repository
+            if not (resolved_repo / ".git").exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Not a git repository (no .git directory): {req.repo_path}",
                 )
-        except Exception as exc:
-            # Rollback: remove the partially created project
-            logger.warning(
-                "Project creation failed after bootstrap — rolling back '%s': %s",
-                name, exc,
-            )
-            _rollback_project(hc_home, name)
-            detail = str(exc)
-            if isinstance(exc, (FileNotFoundError, ValueError)):
-                raise HTTPException(status_code=400, detail=f"Failed to register repo: {detail}")
-            raise HTTPException(status_code=500, detail=f"Project creation failed: {detail}")
 
-        # Notify all SSE clients to refresh their team list
-        broadcast_teams_refresh()
+            # 1d. No duplicate project name
+            from delegate.db import get_connection
+            conn = get_connection(hc_home)
+            try:
+                existing = conn.execute("SELECT 1 FROM projects WHERE name = ?", (name,)).fetchone()
+            finally:
+                conn.close()
+            if existing:
+                raise HTTPException(status_code=409, detail=f"Project '{name}' already exists")
 
-        return {"name": name, "status": "created"}
+            # ── Phase 2: Create (with rollback on failure) ──
+
+            # Generate agent names using friendly name pool
+            exclude = {"delegate"}
+            human = get_default_human(hc_home)
+            if human:
+                exclude.add(human)
+            generated = pick_names(req.agent_count, exclude=exclude)
+            agent_list = [(n, "engineer") for n in generated]
+
+            # Bootstrap
+            models_dict = {"*": req.model} if req.model in ("opus", "sonnet") else None
+            try:
+                bootstrap(hc_home, team_name=name, agents=agent_list, models=models_dict)
+            except (ValueError, FileExistsError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+            # From here on, if anything fails we must clean up the bootstrapped team.
+            try:
+                # Register repo
+                register_repo(hc_home, name, repo_path)
+
+                # Register default workflow (non-critical)
+                try:
+                    from delegate.workflow import register_workflow, get_latest_version
+                    builtin = Path(__file__).parent / "workflows" / "default.py"
+                    if builtin.is_file() and get_latest_version(hc_home, name, "default") is None:
+                        register_workflow(hc_home, name, builtin)
+                except Exception:
+                    logger.warning("Could not register default workflow for project '%s'", name, exc_info=True)
+
+                # Send first-run welcome greeting (non-critical)
+                try:
+                    from delegate.bootstrap import get_member_by_role
+                    from delegate.repo import list_repos as _list_repos_fn
+
+                    manager_name = get_member_by_role(hc_home, name, "manager")
+                    human_name = get_default_human(hc_home)
+                    if manager_name and human_name:
+                        ai_agents = [
+                            a for a in _list_team_agents(hc_home, name)
+                            if a.get("role") != "manager"
+                        ]
+                        greeting = _build_first_run_greeting(
+                            hc_home, name, manager_name, human_name,
+                            agent_count=len(ai_agents),
+                            has_repos=bool(_list_repos_fn(hc_home, name)),
+                        )
+                        _send(hc_home, name, manager_name, human_name, greeting)
+                        logger.info(
+                            "First-run welcome sent during project creation | team=%s",
+                            name,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Could not send first-run greeting for project '%s'",
+                        name, exc_info=True,
+                    )
+            except Exception as exc:
+                # Rollback: remove the partially created project
+                logger.warning(
+                    "Project creation failed after bootstrap — rolling back '%s': %s",
+                    name, exc,
+                )
+                _rollback_project(hc_home, name)
+                detail = str(exc)
+                if isinstance(exc, (FileNotFoundError, ValueError)):
+                    raise HTTPException(status_code=400, detail=f"Failed to register repo: {detail}")
+                raise HTTPException(status_code=500, detail=f"Project creation failed: {detail}")
+
+            # Notify all SSE clients to refresh their team list
+            broadcast_teams_refresh()
+
+            return {"name": name, "status": "created"}
+        return await _run_in_db_pool(_impl)
 
     @app.delete("/projects/{name}")
-    def delete_project(name: str):
+    async def delete_project(name: str):
         """Delete a project (team) and all its data.
 
         Removes the team directory (agents, worktrees, DB, repos config) and
         cleans up the global projects table.  Broadcasts a ``teams_refresh``
         SSE event so all open tabs update their sidebar immediately.
         """
-        import shutil
-        from delegate.db import get_connection
-        from delegate.activity import broadcast_teams_refresh
+        def _impl():
+            import shutil
+            from delegate.db import get_connection
+            from delegate.activity import broadcast_teams_refresh
 
-        td = _team_dir(hc_home, name)
-        if not td.is_dir():
-            raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
+            td = _team_dir(hc_home, name)
+            if not td.is_dir():
+                raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
 
-        # Resolve team UUID before we delete the directory
-        team_uuid: str | None = None
-        try:
-            conn = get_connection(hc_home)
-            row = conn.execute(
-                "SELECT project_id FROM projects WHERE name = ?", (name,)
-            ).fetchone()
-            if row:
-                team_uuid = row["project_id"]
-            conn.close()
-        except Exception:
-            pass
-
-        # Remove the team directory (agents, worktrees, db, repos config)
-        shutil.rmtree(td)
-
-        # Remove from global projects table
-        try:
-            conn = get_connection(hc_home)
+            # Resolve team UUID before we delete the directory
+            team_uuid: str | None = None
             try:
-                conn.execute("DELETE FROM projects WHERE name = ?", (name,))
-                conn.commit()
-            finally:
+                conn = get_connection(hc_home)
+                row = conn.execute(
+                    "SELECT project_id FROM projects WHERE name = ?", (name,)
+                ).fetchone()
+                if row:
+                    team_uuid = row["project_id"]
                 conn.close()
-        except Exception:
-            pass  # Best-effort — directory is already gone
-
-        # Soft-delete team UUID + member IDs in db_ids
-        if team_uuid:
-            try:
-                from delegate.db_ids import soft_delete_team
-                ids_conn = get_connection(hc_home)
-                try:
-                    soft_delete_team(ids_conn, team_uuid)
-                    ids_conn.commit()
-                finally:
-                    ids_conn.close()
             except Exception:
-                pass  # Best-effort
+                pass
 
-        # Notify all SSE clients to refresh their team list
-        broadcast_teams_refresh()
+            # Remove the team directory (agents, worktrees, db, repos config)
+            shutil.rmtree(td)
 
-        return {"ok": True}
+            # Remove from global projects table
+            try:
+                conn = get_connection(hc_home)
+                try:
+                    conn.execute("DELETE FROM projects WHERE name = ?", (name,))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                pass  # Best-effort — directory is already gone
+
+            # Soft-delete team UUID + member IDs in db_ids
+            if team_uuid:
+                try:
+                    from delegate.db_ids import soft_delete_team
+                    ids_conn = get_connection(hc_home)
+                    try:
+                        soft_delete_team(ids_conn, team_uuid)
+                        ids_conn.commit()
+                    finally:
+                        ids_conn.close()
+                except Exception:
+                    pass  # Best-effort
+
+            # Notify all SSE clients to refresh their team list
+            broadcast_teams_refresh()
+
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     # --- Cleanup endpoints ---
 
     @app.get("/teams/{team}/cleanup/preview")
-    def cleanup_preview(team: str, max_age: int = 14):
+    async def cleanup_preview(team: str, max_age: int = 14):
         """Preview what cleanup would do for a team (dry-run)."""
-        from delegate.cleanup import preview_cleanup
-        preview = preview_cleanup(hc_home, team_name=team, max_age_days=max_age)
-        return preview.to_dict()
+        def _impl():
+            from delegate.cleanup import preview_cleanup
+            preview = preview_cleanup(hc_home, team_name=team, max_age_days=max_age)
+            return preview.to_dict()
+        return await _run_in_db_pool(_impl)
 
     @app.post("/teams/{team}/cleanup")
-    def cleanup_team(team: str, max_age: int = 14):
+    async def cleanup_team(team: str, max_age: int = 14):
         """Execute cleanup for a team: prune old data, caches, logs, worktrees."""
-        from delegate.cleanup import run_cleanup
-        result = run_cleanup(hc_home, team_name=team, max_age_days=max_age)
-        return result.to_dict()
+        def _impl():
+            from delegate.cleanup import run_cleanup
+            result = run_cleanup(hc_home, team_name=team, max_age_days=max_age)
+            return result.to_dict()
+        return await _run_in_db_pool(_impl)
 
     @app.get("/cleanup/preview")
-    def cleanup_preview_all(max_age: int = 14):
+    async def cleanup_preview_all(max_age: int = 14):
         """Preview what cleanup would do across all teams (dry-run)."""
-        from delegate.cleanup import preview_cleanup
-        preview = preview_cleanup(hc_home, max_age_days=max_age)
-        return preview.to_dict()
+        def _impl():
+            from delegate.cleanup import preview_cleanup
+            preview = preview_cleanup(hc_home, max_age_days=max_age)
+            return preview.to_dict()
+        return await _run_in_db_pool(_impl)
 
     @app.post("/cleanup")
-    def cleanup_all(max_age: int = 14):
+    async def cleanup_all(max_age: int = 14):
         """Execute cleanup across all teams."""
-        from delegate.cleanup import run_cleanup
-        result = run_cleanup(hc_home, max_age_days=max_age)
-        return result.to_dict()
+        def _impl():
+            from delegate.cleanup import run_cleanup
+            result = run_cleanup(hc_home, max_age_days=max_age)
+            return result.to_dict()
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/default-cwd")
-    def get_default_cwd(team: str):
+    async def get_default_cwd(team: str):
         """Return the default working directory for shell commands in a team.
 
         Resolution order:
         1. First repo root (resolved symlink)
         2. User's home directory
         """
-        from delegate.paths import repos_dir
+        def _impl():
+            from delegate.paths import repos_dir
 
-        repos_path = repos_dir(hc_home, team)
-        if repos_path.exists():
-            repo_links = sorted(repos_path.iterdir())
-            if repo_links:
-                first_repo = repo_links[0]
-                cwd = str(first_repo.resolve()) if first_repo.is_symlink() else str(first_repo)
-                return {"cwd": cwd}
-        return {"cwd": str(Path.home())}
+            repos_path = repos_dir(hc_home, team)
+            if repos_path.exists():
+                repo_links = sorted(repos_path.iterdir())
+                if repo_links:
+                    first_repo = repo_links[0]
+                    cwd = str(first_repo.resolve()) if first_repo.is_symlink() else str(first_repo)
+                    return {"cwd": cwd}
+            return {"cwd": str(Path.home())}
+        return await _run_in_db_pool(_impl)
 
     class ShellExecRequest(BaseModel):
         command: str
@@ -2507,7 +2562,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         timeout: int = 30
 
     @app.post("/teams/{team}/exec/shell")
-    def exec_shell(team: str, req: ShellExecRequest):
+    async def exec_shell(team: str, req: ShellExecRequest):
         """Execute a shell command for the human (magic commands feature).
 
         Resolves CWD in priority order:
@@ -2515,106 +2570,110 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         2. First repo root for the team
         3. User's home directory
         """
-        import time
-        from delegate.paths import repos_dir
+        def _impl():
+            import time
+            from delegate.paths import repos_dir
 
-        # Resolve CWD
-        resolved_cwd: str
-        if req.cwd:
-            resolved_cwd = req.cwd
-        else:
-            # Try to get first repo root
-            repos_path = repos_dir(hc_home, team)
-            if repos_path.exists():
-                repo_links = sorted(repos_path.iterdir())
-                if repo_links:
-                    # Follow the symlink to get the real repo path
-                    first_repo = repo_links[0]
-                    if first_repo.is_symlink():
-                        resolved_cwd = str(first_repo.resolve())
-                    else:
-                        resolved_cwd = str(first_repo)
-                else:
-                    # No repos, use home directory
-                    resolved_cwd = str(Path.home())
+            # Resolve CWD
+            resolved_cwd: str
+            if req.cwd:
+                resolved_cwd = req.cwd
             else:
-                # No repos dir, use home directory
-                resolved_cwd = str(Path.home())
+                # Try to get first repo root
+                repos_path = repos_dir(hc_home, team)
+                if repos_path.exists():
+                    repo_links = sorted(repos_path.iterdir())
+                    if repo_links:
+                        # Follow the symlink to get the real repo path
+                        first_repo = repo_links[0]
+                        if first_repo.is_symlink():
+                            resolved_cwd = str(first_repo.resolve())
+                        else:
+                            resolved_cwd = str(first_repo)
+                    else:
+                        # No repos, use home directory
+                        resolved_cwd = str(Path.home())
+                else:
+                    # No repos dir, use home directory
+                    resolved_cwd = str(Path.home())
 
-        # Expand ~ and ~user paths
-        resolved_cwd = str(Path(resolved_cwd).expanduser())
+            # Expand ~ and ~user paths
+            resolved_cwd = str(Path(resolved_cwd).expanduser())
 
-        # Validate CWD exists
-        cwd_path = Path(resolved_cwd)
-        if not cwd_path.exists() or not cwd_path.is_dir():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Directory not found: {resolved_cwd}"
-            )
+            # Validate CWD exists
+            cwd_path = Path(resolved_cwd)
+            if not cwd_path.exists() or not cwd_path.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Directory not found: {resolved_cwd}"
+                )
 
-        # Execute command
-        start_time = time.time()
-        try:
-            result = subprocess.run(
-                req.command,
-                shell=True,
-                cwd=resolved_cwd,
-                capture_output=True,
-                text=True,
-                timeout=req.timeout,
-            )
-            duration_ms = int((time.time() - start_time) * 1000)
+            # Execute command
+            start_time = time.time()
+            try:
+                result = subprocess.run(
+                    req.command,
+                    shell=True,
+                    cwd=resolved_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=req.timeout,
+                )
+                duration_ms = int((time.time() - start_time) * 1000)
 
-            return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "exit_code": result.returncode,
-                "cwd": resolved_cwd,
-                "duration_ms": duration_ms,
-            }
-        except subprocess.TimeoutExpired as e:
-            duration_ms = int((time.time() - start_time) * 1000)
-            return {
-                "stdout": e.stdout.decode() if e.stdout else "",
-                "stderr": e.stderr.decode() if e.stderr else "",
-                "exit_code": -1,
-                "cwd": resolved_cwd,
-                "duration_ms": duration_ms,
-                "error": f"Command timed out after {req.timeout}s",
-            }
-        except FileNotFoundError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Command execution failed: {str(e)}"
-            )
+                return {
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.returncode,
+                    "cwd": resolved_cwd,
+                    "duration_ms": duration_ms,
+                }
+            except subprocess.TimeoutExpired as e:
+                duration_ms = int((time.time() - start_time) * 1000)
+                return {
+                    "stdout": e.stdout.decode() if e.stdout else "",
+                    "stderr": e.stderr.decode() if e.stderr else "",
+                    "exit_code": -1,
+                    "cwd": resolved_cwd,
+                    "duration_ms": duration_ms,
+                    "error": f"Command timed out after {req.timeout}s",
+                }
+            except FileNotFoundError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Command execution failed: {str(e)}"
+                )
+        return await _run_in_db_pool(_impl)
 
     class CommandMessage(BaseModel):
         command: str
         result: dict
 
     @app.post("/teams/{team}/commands")
-    def save_command(team: str, msg: CommandMessage):
+    async def save_command(team: str, msg: CommandMessage):
         """Persist a command and its result as a message in the DB.
 
         Commands are stored with type='command' and both sender and recipient
         set to the human name. The result is stored as JSON.
         """
-        from delegate.db import get_connection
+        def _impl():
+            from delegate.db import get_connection
 
-        human_name = get_default_human(hc_home)
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        t = _resolve_team(hc_home, team)
+            human_name = get_default_human(hc_home)
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            t = _resolve_team(hc_home, team)
 
-        conn = get_connection(hc_home, team)
-        cursor = conn.execute(
-            "INSERT INTO messages (sender, recipient, content, type, result, delivered_at, project, project_uuid) VALUES (?, ?, ?, 'command', ?, ?, ?, ?)",
-            (human_name, human_name, msg.command, json.dumps(msg.result), now, team, t)
-        )
-        conn.commit()
-        msg_id = cursor.lastrowid
-        conn.close()
+            conn = get_connection(hc_home, team)
+            cursor = conn.execute(
+                "INSERT INTO messages (sender, recipient, content, type, result, delivered_at, project, project_uuid) VALUES (?, ?, ?, 'command', ?, ?, ?, ?)",
+                (human_name, human_name, msg.command, json.dumps(msg.result), now, team, t)
+            )
+            conn.commit()
+            msg_id = cursor.lastrowid
+            conn.close()
 
-        return {"id": msg_id}
+            return {"id": msg_id}
+        return await _run_in_db_pool(_impl)
 
     # --- Legacy global endpoints (aggregate across all teams) ---
     # Prefixed with /api/ to avoid colliding with SPA routes (/tasks, /agents).
@@ -2624,7 +2683,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     _PYPI_CACHE_TTL = 3600  # seconds
 
     @app.get("/api/version")
-    def get_version():
+    async def get_version():
         """Return the current installed version and latest available on PyPI.
 
         Response:
@@ -2638,56 +2697,58 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         On any fetch failure the endpoint still returns 200 with
         ``latest: null`` and ``update_available: false``.
         """
-        import time
-        import urllib.request
-        import json as _json
-        from importlib.metadata import version as _pkg_version
-        from packaging.version import Version
+        def _impl():
+            import time
+            import urllib.request
+            import json as _json
+            from importlib.metadata import version as _pkg_version
+            from packaging.version import Version
 
-        try:
-            current = _pkg_version("delegate-ai")
-        except Exception:
             try:
-                # Package not installed via pip — read version directly from pyproject.toml
-                import tomllib
-                _pyproject = Path(__file__).parent.parent / "pyproject.toml"
-                with open(_pyproject, "rb") as _f:
-                    current = tomllib.load(_f)["project"]["version"]
+                current = _pkg_version("delegate-ai")
             except Exception:
-                current = None
+                try:
+                    # Package not installed via pip — read version directly from pyproject.toml
+                    import tomllib
+                    _pyproject = Path(__file__).parent.parent / "pyproject.toml"
+                    with open(_pyproject, "rb") as _f:
+                        current = tomllib.load(_f)["project"]["version"]
+                except Exception:
+                    current = None
 
-        # Serve from cache if fresh
-        now = time.monotonic()
-        cached = _pypi_cache.get("data")
-        if cached and (now - _pypi_cache.get("fetched_at", 0)) < _PYPI_CACHE_TTL:
-            latest = cached
-        else:
-            latest = None
-            try:
-                req = urllib.request.Request(
-                    "https://pypi.org/pypi/delegate-ai/json",
-                    headers={"User-Agent": "delegate-ai/version-check"},
-                )
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    if resp.status == 200:
-                        data = _json.loads(resp.read())
-                        latest = data["info"]["version"]
-                        _pypi_cache["data"] = latest
-                        _pypi_cache["fetched_at"] = now
-            except Exception:
-                pass  # network error, timeout, bad JSON — leave latest as None
+            # Serve from cache if fresh
+            now = time.monotonic()
+            cached = _pypi_cache.get("data")
+            if cached and (now - _pypi_cache.get("fetched_at", 0)) < _PYPI_CACHE_TTL:
+                latest = cached
+            else:
+                latest = None
+                try:
+                    req = urllib.request.Request(
+                        "https://pypi.org/pypi/delegate-ai/json",
+                        headers={"User-Agent": "delegate-ai/version-check"},
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = _json.loads(resp.read())
+                            latest = data["info"]["version"]
+                            _pypi_cache["data"] = latest
+                            _pypi_cache["fetched_at"] = now
+                except Exception:
+                    pass  # network error, timeout, bad JSON — leave latest as None
 
-        update_available = False
-        if latest is not None and current is not None:
-            try:
-                update_available = Version(latest) > Version(current)
-            except Exception:
-                pass
+            update_available = False
+            if latest is not None and current is not None:
+                try:
+                    update_available = Version(latest) > Version(current)
+                except Exception:
+                    pass
 
-        return {"current": current, "latest": latest, "update_available": update_available}
+            return {"current": current, "latest": latest, "update_available": update_available}
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks")
-    def get_tasks(status: str | None = None, assignee: str | None = None, team: str | None = None):
+    async def get_tasks(status: str | None = None, assignee: str | None = None, team: str | None = None):
         """List tasks across all teams or specific team.
 
         Query params:
@@ -2695,25 +2756,27 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             assignee: Filter by assignee
             team: Filter by team name, or "all" for all teams (default: all)
         """
-        all_tasks = []
-        # Determine which teams to query
-        if team and team != "all":
-            teams = [team]
-        else:
-            teams = _list_teams(hc_home)
+        def _impl():
+            all_tasks = []
+            # Determine which teams to query
+            if team and team != "all":
+                teams = [team]
+            else:
+                teams = _list_teams(hc_home)
 
-        for t in teams:
-            try:
-                tasks = _list_tasks(hc_home, t, status=status, assignee=assignee)
-                for task in tasks:
-                    task["team"] = t
-                all_tasks.extend(tasks)
-            except Exception:
-                pass
+            for t in teams:
+                try:
+                    tasks = _list_tasks(hc_home, t, status=status, assignee=assignee)
+                    for task in tasks:
+                        task["team"] = t
+                    all_tasks.extend(tasks)
+                except Exception:
+                    pass
 
-        # Sort by updated_at desc
-        all_tasks.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-        return all_tasks
+            # Sort by updated_at desc
+            all_tasks.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+            return all_tasks
+        return await _run_in_db_pool(_impl)
 
     # --- Pydantic models for request bodies ---
 
@@ -2739,292 +2802,326 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     # --- Global task endpoints ---
 
     @app.get("/api/tasks/{task_id}")
-    def get_task_global(task_id: int):
+    async def get_task_global(task_id: int):
         """Get a single task by ID — scans all teams."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                task["team"] = t
-                return task
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception("Unexpected error in get_task_global for task %d team %s", task_id, t)
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    task["team"] = t
+                    return task
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception("Unexpected error in get_task_global for task %d team %s", task_id, t)
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/stats")
-    def get_task_stats_global(task_id: int):
+    async def get_task_stats_global(task_id: int):
         """Get task stats — scans all teams for the task (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                stats = _get_task_stats(hc_home, t, task_id)
-                created = datetime.fromisoformat(task["created_at"].replace("Z", "+00:00"))
-                completed_at = task.get("completed_at")
-                ended = datetime.fromisoformat(completed_at.replace("Z", "+00:00")) if completed_at else datetime.now(timezone.utc)
-                elapsed_seconds = (ended - created).total_seconds()
-                return {"task_id": task_id, "elapsed_seconds": elapsed_seconds, "branch": task.get("branch", ""), **stats}
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception("Unexpected error in get_task_stats_global for task %d team %s", task_id, t)
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    stats = _get_task_stats(hc_home, t, task_id)
+                    created = datetime.fromisoformat(task["created_at"].replace("Z", "+00:00"))
+                    completed_at = task.get("completed_at")
+                    ended = datetime.fromisoformat(completed_at.replace("Z", "+00:00")) if completed_at else datetime.now(timezone.utc)
+                    elapsed_seconds = (ended - created).total_seconds()
+                    return {"task_id": task_id, "elapsed_seconds": elapsed_seconds, "branch": task.get("branch", ""), **stats}
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception("Unexpected error in get_task_stats_global for task %d team %s", task_id, t)
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/diff")
-    def get_task_diff_global(task_id: int):
+    async def get_task_diff_global(task_id: int):
         """Get task diff — scans all teams (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                diff_dict = _get_task_diff(hc_home, t, task_id)
-                return {"task_id": task_id, "branch": task.get("branch", ""), "repo": task.get("repo", []), "diff": diff_dict, "merge_base": task.get("merge_base", {}), "merge_tip": task.get("merge_tip", {})}
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception("Unexpected error in get_task_diff_global for task %d team %s", task_id, t)
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    diff_dict = _get_task_diff(hc_home, t, task_id)
+                    return {"task_id": task_id, "branch": task.get("branch", ""), "repo": task.get("repo", []), "diff": diff_dict, "merge_base": task.get("merge_base", {}), "merge_tip": task.get("merge_tip", {})}
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception("Unexpected error in get_task_diff_global for task %d team %s", task_id, t)
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/activity")
-    def get_task_activity_global(task_id: int, limit: int | None = None):
+    async def get_task_activity_global(task_id: int, limit: int | None = None):
         """Get task activity — scans all teams (legacy compat)."""
-        from delegate.chat import get_task_timeline
+        def _impl():
+            from delegate.chat import get_task_timeline
 
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                return get_task_timeline(hc_home, t, task_id, limit=limit)
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.exception("Unexpected error in get_task_activity_global for task %d team %s", task_id, t)
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    return get_task_timeline(hc_home, t, task_id, limit=limit)
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.exception("Unexpected error in get_task_activity_global for task %d team %s", task_id, t)
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/approve")
-    def approve_task_global(task_id: int, body: ApproveBody | None = None):
+    async def approve_task_global(task_id: int, body: ApproveBody | None = None):
         """Approve task — scans all teams (legacy compat)."""
-        from delegate.review import set_verdict
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                if task["status"] != "in_approval":
-                    raise HTTPException(status_code=400, detail=f"Cannot approve task in '{task['status']}' status. Task must be in 'in_approval' status.")
-                attempt = task.get("review_attempt", 0)
-                human_name = get_default_human(hc_home)
-                summary = body.summary if body else ""
-                if attempt > 0:
-                    set_verdict(hc_home, t, task_id, attempt, "approved", summary=summary, reviewer=human_name)
-                updated = _update_task(hc_home, t, task_id, approval_status="approved")
-                _log_event(hc_home, t, f"{format_task_id(task_id)} approved \u2713", task_id=task_id)
-                return updated
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import set_verdict
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    if task["status"] != "in_approval":
+                        raise HTTPException(status_code=400, detail=f"Cannot approve task in '{task['status']}' status. Task must be in 'in_approval' status.")
+                    attempt = task.get("review_attempt", 0)
+                    human_name = get_default_human(hc_home)
+                    summary = body.summary if body else ""
+                    if attempt > 0:
+                        set_verdict(hc_home, t, task_id, attempt, "approved", summary=summary, reviewer=human_name)
+                    updated = _update_task(hc_home, t, task_id, approval_status="approved")
+                    _log_event(hc_home, t, f"{format_task_id(task_id)} approved \u2713", task_id=task_id)
+                    return updated
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/reject")
-    def reject_task_global(task_id: int, body: RejectBody):
+    async def reject_task_global(task_id: int, body: RejectBody):
         """Reject task — scans all teams (legacy compat)."""
-        from delegate.review import set_verdict
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
+        def _impl():
+            from delegate.review import set_verdict
+            for t in _list_teams(hc_home):
                 try:
-                    _change_status(hc_home, t, task_id, "rejected")
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-                attempt = task.get("review_attempt", 0)
-                human_name = get_default_human(hc_home)
-                summary = body.summary or body.reason
-                if attempt > 0:
-                    set_verdict(hc_home, t, task_id, attempt, "rejected", summary=summary, reviewer=human_name)
-                updated = _update_task(hc_home, t, task_id, rejection_reason=body.reason, approval_status="rejected")
-                from delegate.notify import notify_rejection
-                notify_rejection(hc_home, t, task, reason=body.reason)
-                _log_event(hc_home, t, f"{format_task_id(task_id)} rejected \u2014 {body.reason}", task_id=task_id)
-                return updated
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                    task = _get_task(hc_home, t, task_id)
+                    try:
+                        _change_status(hc_home, t, task_id, "rejected")
+                    except ValueError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
+                    attempt = task.get("review_attempt", 0)
+                    human_name = get_default_human(hc_home)
+                    summary = body.summary or body.reason
+                    if attempt > 0:
+                        set_verdict(hc_home, t, task_id, attempt, "rejected", summary=summary, reviewer=human_name)
+                    updated = _update_task(hc_home, t, task_id, rejection_reason=body.reason, approval_status="rejected")
+                    from delegate.notify import notify_rejection
+                    notify_rejection(hc_home, t, task, reason=body.reason)
+                    _log_event(hc_home, t, f"{format_task_id(task_id)} rejected \u2014 {body.reason}", task_id=task_id)
+                    return updated
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/comments")
-    def get_task_comments_global(task_id: int, limit: int = 50):
+    async def get_task_comments_global(task_id: int, limit: int = 50):
         """Get task comments — scans all teams (legacy compat)."""
-        from delegate.task import get_comments as _get_comments
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                return _get_comments(hc_home, t, task_id, limit=limit)
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.task import get_comments as _get_comments
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    return _get_comments(hc_home, t, task_id, limit=limit)
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/comments")
-    def post_task_comment_global(task_id: int, comment: TaskCommentBody):
+    async def post_task_comment_global(task_id: int, comment: TaskCommentBody):
         """Add a comment to a task — scans all teams (legacy compat)."""
-        from delegate.task import add_comment as _add_comment
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                cid = _add_comment(hc_home, t, task_id, comment.author, comment.body)
-                # Notify manager if comment is from a human member
+        def _impl():
+            from delegate.task import add_comment as _add_comment
+            for t in _list_teams(hc_home):
                 try:
-                    from delegate.config import get_human_members
-                    human_names = {m["name"] for m in get_human_members(hc_home)}
-                    if comment.author in human_names:
-                        from delegate.notify import notify_human_comment
-                        notify_human_comment(hc_home, t, task_id, comment.author, comment.body)
-                except Exception:
-                    logger.debug("Failed to send human comment notification", exc_info=True)
-                return {"id": cid, "task_id": task_id, "author": comment.author, "body": comment.body}
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                    _get_task(hc_home, t, task_id)
+                    cid = _add_comment(hc_home, t, task_id, comment.author, comment.body)
+                    # Notify manager if comment is from a human member
+                    try:
+                        from delegate.config import get_human_members
+                        human_names = {m["name"] for m in get_human_members(hc_home)}
+                        if comment.author in human_names:
+                            from delegate.notify import notify_human_comment
+                            notify_human_comment(hc_home, t, task_id, comment.author, comment.body)
+                    except Exception:
+                        logger.debug("Failed to send human comment notification", exc_info=True)
+                    return {"id": cid, "task_id": task_id, "author": comment.author, "body": comment.body}
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/merge-preview")
-    def get_task_merge_preview_global(task_id: int):
+    async def get_task_merge_preview_global(task_id: int):
         """Get merge preview — scans all teams (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                preview = _get_merge_preview(hc_home, t, task_id)
-                return {
-                    "task_id": task_id,
-                    "branch": task.get("branch", ""),
-                    "diff": preview,
-                }
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    preview = _get_merge_preview(hc_home, t, task_id)
+                    return {
+                        "task_id": task_id,
+                        "branch": task.get("branch", ""),
+                        "diff": preview,
+                    }
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/commits")
-    def get_task_commits_global(task_id: int):
+    async def get_task_commits_global(task_id: int):
         """Get task commits — scans all teams (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                diffs = _get_commit_diffs(hc_home, t, task_id)
-                return {"task_id": task_id, "branch": task.get("branch", ""), "commit_diffs": diffs}
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    diffs = _get_commit_diffs(hc_home, t, task_id)
+                    return {"task_id": task_id, "branch": task.get("branch", ""), "commit_diffs": diffs}
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/retry-merge")
-    def retry_merge_global(task_id: int):
+    async def retry_merge_global(task_id: int):
         """Retry a failed merge — scans all teams (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                if task["status"] != "merge_failed":
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Task is in '{task['status']}', not 'merge_failed'",
-                    )
-                from delegate.task import transition_task
-                _update_task(hc_home, t, task_id, merge_attempts=0, status_detail="")
-                from delegate.bootstrap import get_member_by_role
-                manager = get_member_by_role(hc_home, t, "manager") or "delegate"
-                updated = transition_task(hc_home, t, task_id, "merging", manager)
-                return updated
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    if task["status"] != "merge_failed":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Task is in '{task['status']}', not 'merge_failed'",
+                        )
+                    from delegate.task import transition_task
+                    _update_task(hc_home, t, task_id, merge_attempts=0, status_detail="")
+                    from delegate.bootstrap import get_member_by_role
+                    manager = get_member_by_role(hc_home, t, "manager") or "delegate"
+                    updated = transition_task(hc_home, t, task_id, "merging", manager)
+                    return updated
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/cancel")
-    def cancel_task_global(task_id: int):
+    async def cancel_task_global(task_id: int):
         """Cancel a task — scans all teams (legacy compat)."""
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                from delegate.task import cancel_task
-                updated = cancel_task(hc_home, t, task_id)
-                return updated
-            except (FileNotFoundError, ValueError):
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    from delegate.task import cancel_task
+                    updated = cancel_task(hc_home, t, task_id)
+                    return updated
+                except (FileNotFoundError, ValueError):
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/reviews")
-    def get_task_reviews_global(task_id: int):
+    async def get_task_reviews_global(task_id: int):
         """Get all review attempts for a task — scans all teams (legacy compat)."""
-        from delegate.review import get_reviews, get_comments
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                reviews = get_reviews(hc_home, t, task_id)
-                for r in reviews:
-                    r["comments"] = get_comments(hc_home, t, task_id, r["attempt"])
-                return reviews
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import get_reviews, get_comments
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    reviews = get_reviews(hc_home, t, task_id)
+                    for r in reviews:
+                        r["comments"] = get_comments(hc_home, t, task_id, r["attempt"])
+                    return reviews
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/reviews/current")
-    def get_task_current_review_global(task_id: int):
+    async def get_task_current_review_global(task_id: int):
         """Get current review attempt with comments — scans all teams (legacy compat)."""
-        from delegate.review import get_current_review
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                review = get_current_review(hc_home, t, task_id)
-                if review is None:
-                    return {"attempt": 0, "verdict": None, "summary": "", "comments": []}
-                return review
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import get_current_review
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    review = get_current_review(hc_home, t, task_id)
+                    if review is None:
+                        return {"attempt": 0, "verdict": None, "summary": "", "comments": []}
+                    return review
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/reviews/comments")
-    def post_review_comment_global(task_id: int, comment: ReviewCommentBody):
+    async def post_review_comment_global(task_id: int, comment: ReviewCommentBody):
         """Add an inline comment to the current review attempt — scans all teams (legacy compat)."""
-        from delegate.review import add_comment
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-                attempt = task.get("review_attempt", 0)
-                if attempt == 0:
-                    raise HTTPException(status_code=400, detail="Task has no active review attempt.")
-                human_name = get_default_human(hc_home)
-                result = add_comment(
-                    hc_home, t, task_id, attempt,
-                    file=comment.file, body=comment.body, author=human_name,
-                    line=comment.line,
-                )
-                return result
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import add_comment
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                    attempt = task.get("review_attempt", 0)
+                    if attempt == 0:
+                        raise HTTPException(status_code=400, detail="Task has no active review attempt.")
+                    human_name = get_default_human(hc_home)
+                    result = add_comment(
+                        hc_home, t, task_id, attempt,
+                        file=comment.file, body=comment.body, author=human_name,
+                        line=comment.line,
+                    )
+                    return result
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.put("/api/tasks/{task_id}/reviews/comments/{comment_id}")
-    def edit_review_comment_global(task_id: int, comment_id: int, payload: ReviewCommentUpdateBody):
+    async def edit_review_comment_global(task_id: int, comment_id: int, payload: ReviewCommentUpdateBody):
         """Edit an existing review comment's body — scans all teams (legacy compat)."""
-        from delegate.review import update_comment
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                result = update_comment(hc_home, t, comment_id, payload.body)
-                if result is None:
-                    raise HTTPException(status_code=404, detail="Comment not found")
-                return result
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import update_comment
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    result = update_comment(hc_home, t, comment_id, payload.body)
+                    if result is None:
+                        raise HTTPException(status_code=404, detail="Comment not found")
+                    return result
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.delete("/api/tasks/{task_id}/reviews/comments/{comment_id}")
-    def remove_review_comment_global(task_id: int, comment_id: int):
+    async def remove_review_comment_global(task_id: int, comment_id: int):
         """Delete a review comment — scans all teams (legacy compat)."""
-        from delegate.review import delete_comment
-        for t in _list_teams(hc_home):
-            try:
-                _get_task(hc_home, t, task_id)
-                deleted = delete_comment(hc_home, t, comment_id)
-                if not deleted:
-                    raise HTTPException(status_code=404, detail="Comment not found")
-                return {"ok": True}
-            except FileNotFoundError:
-                continue
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        def _impl():
+            from delegate.review import delete_comment
+            for t in _list_teams(hc_home):
+                try:
+                    _get_task(hc_home, t, task_id)
+                    deleted = delete_comment(hc_home, t, comment_id)
+                    if not deleted:
+                        raise HTTPException(status_code=404, detail="Comment not found")
+                    return {"ok": True}
+                except FileNotFoundError:
+                    continue
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     # ---------------------------------------------------------------------------
     # Reviewer edit endpoints
@@ -3057,7 +3154,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         return result.stdout
 
     @app.get("/api/tasks/{task_id}/file")
-    def get_task_file_global(task_id: int, path: str):
+    async def get_task_file_global(task_id: int, path: str):
         """Return file content + HEAD sha from the task branch.
 
         Query params:
@@ -3069,39 +3166,41 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         Errors:
             404 if task or file not found
         """
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-            except FileNotFoundError:
-                continue
+        def _impl():
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                except FileNotFoundError:
+                    continue
 
-            branch = task.get("branch", "")
-            if not branch:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} has no branch")
+                branch = task.get("branch", "")
+                if not branch:
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} has no branch")
 
-            repos = task.get("repo", [])
-            if not repos:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} has no associated repo")
+                repos = task.get("repo", [])
+                if not repos:
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} has no associated repo")
 
-            from delegate.repo import get_repo_path
-            repo_name = repos[0]
-            try:
-                repo_dir = str(get_repo_path(hc_home, t, repo_name).resolve())
-            except Exception:
-                raise HTTPException(status_code=404, detail=f"Repo {repo_name!r} not found")
+                from delegate.repo import get_repo_path
+                repo_name = repos[0]
+                try:
+                    repo_dir = str(get_repo_path(hc_home, t, repo_name).resolve())
+                except Exception:
+                    raise HTTPException(status_code=404, detail=f"Repo {repo_name!r} not found")
 
-            try:
-                head_sha = _get_branch_head_sha(repo_dir, branch)
-            except RuntimeError as e:
-                raise HTTPException(status_code=404, detail=str(e))
+                try:
+                    head_sha = _get_branch_head_sha(repo_dir, branch)
+                except RuntimeError as e:
+                    raise HTTPException(status_code=404, detail=str(e))
 
-            content = _read_file_from_branch(repo_dir, branch, path)
-            if content is None:
-                raise HTTPException(status_code=404, detail=f"File {path!r} not found on branch {branch!r}")
+                content = _read_file_from_branch(repo_dir, branch, path)
+                if content is None:
+                    raise HTTPException(status_code=404, detail=f"File {path!r} not found on branch {branch!r}")
 
-            return {"content": content, "head_sha": head_sha}
+                return {"content": content, "head_sha": head_sha}
 
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     class ReviewerEdit(BaseModel):
         file: str
@@ -3112,7 +3211,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         edits: list[ReviewerEdit]
 
     @app.post("/api/tasks/{task_id}/reviewer-edits")
-    def post_reviewer_edits_global(task_id: int, body: ReviewerEditsBody):
+    async def post_reviewer_edits_global(task_id: int, body: ReviewerEditsBody):
         """Commit reviewer edits to the task branch.
 
         Request body:
@@ -3132,192 +3231,194 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             404 if task/repo not found
             409 if expected_sha is stale
         """
-        import uuid as _uuid
+        def _impl():
+            import uuid as _uuid
 
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-            except FileNotFoundError:
-                continue
-
-            # Status gate
-            status = task.get("status", "")
-            if status not in ("in_review", "in_approval"):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Reviewer edits are only allowed for tasks in 'in_review' or 'in_approval' status (current: {status!r})",
-                )
-
-            branch = task.get("branch", "")
-            if not branch:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} has no branch")
-
-            repos = task.get("repo", [])
-            if not repos:
-                raise HTTPException(status_code=404, detail=f"Task {task_id} has no associated repo")
-
-            from delegate.repo import get_repo_path
-            repo_name = repos[0]
-            try:
-                repo_dir = str(get_repo_path(hc_home, t, repo_name).resolve())
-            except Exception:
-                raise HTTPException(status_code=404, detail=f"Repo {repo_name!r} not found")
-
-            # Stale detection
-            try:
-                current_head = _get_branch_head_sha(repo_dir, branch)
-            except RuntimeError as e:
-                raise HTTPException(status_code=404, detail=str(e))
-
-            for edit in body.edits:
-                if edit.expected_sha != current_head:
-                    raise HTTPException(
-                        status_code=409,
-                        detail={"error": "stale", "current_sha": current_head},
-                    )
-
-            # Determine author name
-            human_name = get_default_human(hc_home) or "reviewer"
-
-            # Create temp worktree
-            uid = _uuid.uuid4().hex[:12]
-            parts = branch.rsplit("/", 1)
-            if len(parts) == 2:
-                temp_branch = f"{parts[0]}/_review/{uid}/{parts[1]}"
-            else:
-                temp_branch = f"_review/{uid}/{branch}"
-
-            team_uuid_dir = _team_dir(hc_home, t)
-            wt_path = team_uuid_dir / "worktrees" / "_review" / uid / format_task_id(task_id)
-            wt_path.parent.mkdir(parents=True, exist_ok=True)
-
-            result = subprocess.run(
-                ["git", "worktree", "add", "-b", temp_branch, str(wt_path), branch],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to create temp worktree: {result.stderr.strip()}",
-                )
-
-            try:
-                any_changed = False
-                for edit in body.edits:
-                    dest = wt_path / edit.file
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Check if content is byte-identical to avoid no-op writes
-                    existing = _read_file_from_branch(repo_dir, branch, edit.file)
-                    if existing == edit.content:
-                        continue  # Skip identical content
-
-                    dest.write_text(edit.content, encoding="utf-8")
-                    any_changed = True
-
-                if not any_changed:
-                    return {"new_sha": current_head, "no_changes": True}
-
-                # Stage and commit
-                add_result = subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=str(wt_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if add_result.returncode != 0:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"git add failed: {add_result.stderr.strip()}",
-                    )
-
-                commit_result = subprocess.run(
-                    [
-                        "git", "commit",
-                        f"--author={human_name} <{human_name}@localhost>",
-                        "-m", f"reviewer edits — T{task_id}",
-                    ],
-                    cwd=str(wt_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if commit_result.returncode != 0:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"git commit failed: {commit_result.stderr.strip()}",
-                    )
-
-                # Get new HEAD sha from the temp worktree
-                sha_result = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=str(wt_path),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if sha_result.returncode != 0:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to read new HEAD sha after commit",
-                    )
-                new_sha = sha_result.stdout.strip()
-
-                # Fast-forward the original branch to the new commit
-                ff_result = subprocess.run(
-                    ["git", "update-ref", f"refs/heads/{branch}", new_sha],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if ff_result.returncode != 0:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to advance branch: {ff_result.stderr.strip()}",
-                    )
-
-                return {"new_sha": new_sha}
-
-            finally:
-                # Best-effort cleanup of temp worktree and branch
-                subprocess.run(
-                    ["git", "worktree", "remove", str(wt_path), "--force"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    timeout=30,
-                )
-                subprocess.run(
-                    ["git", "worktree", "prune"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    timeout=30,
-                )
-                subprocess.run(
-                    ["git", "branch", "-D", temp_branch],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    timeout=30,
-                )
-                # Clean up empty parent dirs
+            for t in _list_teams(hc_home):
                 try:
-                    parent = wt_path.parent
-                    while parent.name != "_review" and parent != parent.parent:
-                        if parent.exists() and not any(parent.iterdir()):
-                            parent.rmdir()
-                            parent = parent.parent
-                        else:
-                            break
-                    if parent.name == "_review" and parent.exists() and not any(parent.iterdir()):
-                        parent.rmdir()
-                except OSError:
-                    pass
+                    task = _get_task(hc_home, t, task_id)
+                except FileNotFoundError:
+                    continue
 
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                # Status gate
+                status = task.get("status", "")
+                if status not in ("in_review", "in_approval"):
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Reviewer edits are only allowed for tasks in 'in_review' or 'in_approval' status (current: {status!r})",
+                    )
+
+                branch = task.get("branch", "")
+                if not branch:
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} has no branch")
+
+                repos = task.get("repo", [])
+                if not repos:
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} has no associated repo")
+
+                from delegate.repo import get_repo_path
+                repo_name = repos[0]
+                try:
+                    repo_dir = str(get_repo_path(hc_home, t, repo_name).resolve())
+                except Exception:
+                    raise HTTPException(status_code=404, detail=f"Repo {repo_name!r} not found")
+
+                # Stale detection
+                try:
+                    current_head = _get_branch_head_sha(repo_dir, branch)
+                except RuntimeError as e:
+                    raise HTTPException(status_code=404, detail=str(e))
+
+                for edit in body.edits:
+                    if edit.expected_sha != current_head:
+                        raise HTTPException(
+                            status_code=409,
+                            detail={"error": "stale", "current_sha": current_head},
+                        )
+
+                # Determine author name
+                human_name = get_default_human(hc_home) or "reviewer"
+
+                # Create temp worktree
+                uid = _uuid.uuid4().hex[:12]
+                parts = branch.rsplit("/", 1)
+                if len(parts) == 2:
+                    temp_branch = f"{parts[0]}/_review/{uid}/{parts[1]}"
+                else:
+                    temp_branch = f"_review/{uid}/{branch}"
+
+                team_uuid_dir = _team_dir(hc_home, t)
+                wt_path = team_uuid_dir / "worktrees" / "_review" / uid / format_task_id(task_id)
+                wt_path.parent.mkdir(parents=True, exist_ok=True)
+
+                result = subprocess.run(
+                    ["git", "worktree", "add", "-b", temp_branch, str(wt_path), branch],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if result.returncode != 0:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to create temp worktree: {result.stderr.strip()}",
+                    )
+
+                try:
+                    any_changed = False
+                    for edit in body.edits:
+                        dest = wt_path / edit.file
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Check if content is byte-identical to avoid no-op writes
+                        existing = _read_file_from_branch(repo_dir, branch, edit.file)
+                        if existing == edit.content:
+                            continue  # Skip identical content
+
+                        dest.write_text(edit.content, encoding="utf-8")
+                        any_changed = True
+
+                    if not any_changed:
+                        return {"new_sha": current_head, "no_changes": True}
+
+                    # Stage and commit
+                    add_result = subprocess.run(
+                        ["git", "add", "-A"],
+                        cwd=str(wt_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if add_result.returncode != 0:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"git add failed: {add_result.stderr.strip()}",
+                        )
+
+                    commit_result = subprocess.run(
+                        [
+                            "git", "commit",
+                            f"--author={human_name} <{human_name}@localhost>",
+                            "-m", f"reviewer edits — T{task_id}",
+                        ],
+                        cwd=str(wt_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if commit_result.returncode != 0:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"git commit failed: {commit_result.stderr.strip()}",
+                        )
+
+                    # Get new HEAD sha from the temp worktree
+                    sha_result = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=str(wt_path),
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if sha_result.returncode != 0:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Failed to read new HEAD sha after commit",
+                        )
+                    new_sha = sha_result.stdout.strip()
+
+                    # Fast-forward the original branch to the new commit
+                    ff_result = subprocess.run(
+                        ["git", "update-ref", f"refs/heads/{branch}", new_sha],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if ff_result.returncode != 0:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to advance branch: {ff_result.stderr.strip()}",
+                        )
+
+                    return {"new_sha": new_sha}
+
+                finally:
+                    # Best-effort cleanup of temp worktree and branch
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(wt_path), "--force"],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    subprocess.run(
+                        ["git", "worktree", "prune"],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-D", temp_branch],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=30,
+                    )
+                    # Clean up empty parent dirs
+                    try:
+                        parent = wt_path.parent
+                        while parent.name != "_review" and parent != parent.parent:
+                            if parent.exists() and not any(parent.iterdir()):
+                                parent.rmdir()
+                                parent = parent.parent
+                            else:
+                                break
+                        if parent.name == "_review" and parent.exists() and not any(parent.iterdir()):
+                            parent.rmdir()
+                    except OSError:
+                        pass
+
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     # ---------------------------------------------------------------------------
     # File completion endpoints
@@ -3374,7 +3475,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     _COMPLETION_MAX_LIMIT = 50
 
     @app.get("/api/files/complete")
-    def get_files_complete(path: str = "", limit: int = 20):
+    async def get_files_complete(path: str = "", limit: int = 20):
         """List filesystem entries whose absolute paths begin with ``path``.
 
         Query params:
@@ -3389,20 +3490,23 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         Errors:
             400 if path is non-empty, non-absolute (after ~ expansion), or contains ``..`` components.
         """
-        if not path:
-            path = str(Path.home()) + "/"
-        elif path.startswith("~"):
-            path = str(Path(path).expanduser())
-        if not path.startswith("/"):
-            raise HTTPException(status_code=400, detail="path must be an absolute path starting with /")
-        if ".." in path.split("/"):
-            raise HTTPException(status_code=400, detail="path traversal via .. is not allowed")
-        limit = min(max(1, limit), _COMPLETION_MAX_LIMIT)
-        entries = _list_completions(path, limit)
-        return {"entries": entries}
+        def _impl():
+            p = path
+            if not p:
+                p = str(Path.home()) + "/"
+            elif p.startswith("~"):
+                p = str(Path(p).expanduser())
+            if not p.startswith("/"):
+                raise HTTPException(status_code=400, detail="path must be an absolute path starting with /")
+            if ".." in p.split("/"):
+                raise HTTPException(status_code=400, detail="path traversal via .. is not allowed")
+            lim = min(max(1, limit), _COMPLETION_MAX_LIMIT)
+            entries = _list_completions(p, lim)
+            return {"entries": entries}
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/files/complete")
-    def get_task_files_complete(task_id: int, q: str = "", limit: int = 20):
+    async def get_task_files_complete(task_id: int, q: str = "", limit: int = 20):
         """List worktree entries matching the partial relative path ``q``.
 
         Query params:
@@ -3418,63 +3522,65 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             400 if ``q`` contains ``..`` components.
             404 if task has no worktree (not in_progress / in_review / in_approval).
         """
-        from delegate.repo import get_task_worktree_path
+        def _impl():
+            from delegate.repo import get_task_worktree_path
 
-        if ".." in q.split("/"):
-            raise HTTPException(status_code=400, detail="path traversal via .. is not allowed")
-        limit = min(max(1, limit), _COMPLETION_MAX_LIMIT)
+            if ".." in q.split("/"):
+                raise HTTPException(status_code=400, detail="path traversal via .. is not allowed")
+            lim = min(max(1, limit), _COMPLETION_MAX_LIMIT)
 
-        _active_statuses = {"in_progress", "in_review", "in_approval"}
+            _active_statuses = {"in_progress", "in_review", "in_approval"}
 
-        for t in _list_teams(hc_home):
-            try:
-                task = _get_task(hc_home, t, task_id)
-            except FileNotFoundError:
-                continue
+            for t in _list_teams(hc_home):
+                try:
+                    task = _get_task(hc_home, t, task_id)
+                except FileNotFoundError:
+                    continue
 
-            status = task.get("status", "")
-            if status not in _active_statuses:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Task {task_id} has no worktree (status: {status!r})",
-                )
+                status = task.get("status", "")
+                if status not in _active_statuses:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Task {task_id} has no worktree (status: {status!r})",
+                    )
 
-            repos = task.get("repo", [])
-            if not repos:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Task {task_id} has no associated repo",
-                )
+                repos = task.get("repo", [])
+                if not repos:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Task {task_id} has no associated repo",
+                    )
 
-            repo_name = repos[0]
-            wt_root = get_task_worktree_path(hc_home, t, repo_name, task_id)
-            if not wt_root.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Worktree for task {task_id} does not exist on disk",
-                )
+                repo_name = repos[0]
+                wt_root = get_task_worktree_path(hc_home, t, repo_name, task_id)
+                if not wt_root.exists():
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Worktree for task {task_id} does not exist on disk",
+                    )
 
-            # Build the absolute prefix and list
-            abs_prefix = str(wt_root / q) if q else str(wt_root) + "/"
-            abs_entries = _list_completions(abs_prefix, limit)
+                # Build the absolute prefix and list
+                abs_prefix = str(wt_root / q) if q else str(wt_root) + "/"
+                abs_entries = _list_completions(abs_prefix, lim)
 
-            # Convert absolute paths to paths relative to worktree root
-            wt_root_str = str(wt_root)
-            rel_entries = []
-            for e in abs_entries:
-                abs_p = e["path"]
-                if abs_p.startswith(wt_root_str + "/"):
-                    rel_p = abs_p[len(wt_root_str) + 1:]
-                else:
-                    rel_p = abs_p
-                rel_entries.append({"path": rel_p, "is_dir": e["is_dir"], "has_git": e["has_git"]})
+                # Convert absolute paths to paths relative to worktree root
+                wt_root_str = str(wt_root)
+                rel_entries = []
+                for e in abs_entries:
+                    abs_p = e["path"]
+                    if abs_p.startswith(wt_root_str + "/"):
+                        rel_p = abs_p[len(wt_root_str) + 1:]
+                    else:
+                        rel_p = abs_p
+                    rel_entries.append({"path": rel_p, "is_dir": e["is_dir"], "has_git": e["has_git"]})
 
-            return {"entries": rel_entries}
+                return {"entries": rel_entries}
 
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/api/messages")
-    def get_messages(since: str | None = None, between: str | None = None, type: str | None = None, limit: int | None = None, before_id: int | None = None, team: str | None = None):
+    async def get_messages(since: str | None = None, between: str | None = None, type: str | None = None, limit: int | None = None, before_id: int | None = None, team: str | None = None):
         """Messages across all teams or specific team.
 
         Query params:
@@ -3485,229 +3591,255 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             before_id: Return messages before this ID
             team: Filter by team name, or "all" for all teams (default: all)
         """
-        between_tuple = None
-        if between:
-            parts = [p.strip() for p in between.split(",")]
-            if len(parts) == 2:
-                between_tuple = (parts[0], parts[1])
+        def _impl():
+            between_tuple = None
+            if between:
+                parts = [p.strip() for p in between.split(",")]
+                if len(parts) == 2:
+                    between_tuple = (parts[0], parts[1])
 
-        # Determine which teams to query
-        if team and team != "all":
-            teams = [team]
-        else:
-            teams = _list_teams(hc_home)
+            # Determine which teams to query
+            if team and team != "all":
+                teams = [team]
+            else:
+                teams = _list_teams(hc_home)
 
-        all_msgs = []
-        for t in teams:
-            try:
-                msgs = _get_messages(hc_home, t, since=since, between=between_tuple, msg_type=type, limit=limit, before_id=before_id)
-                for m in msgs:
-                    m["team"] = t
-                all_msgs.extend(msgs)
-            except Exception:
-                pass
-        all_msgs.sort(key=lambda m: m.get("id", 0))
-        if limit:
-            all_msgs = all_msgs[:limit]
-        return all_msgs
+            all_msgs = []
+            for t in teams:
+                try:
+                    msgs = _get_messages(hc_home, t, since=since, between=between_tuple, msg_type=type, limit=limit, before_id=before_id)
+                    for m in msgs:
+                        m["team"] = t
+                    all_msgs.extend(msgs)
+                except Exception:
+                    pass
+            all_msgs.sort(key=lambda m: m.get("id", 0))
+            if limit:
+                all_msgs = all_msgs[:limit]
+            return all_msgs
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/messages")
-    def post_message(msg: SendMessage):
+    async def post_message(msg: SendMessage):
         """Human sends a message (legacy — uses msg.team field)."""
-        team = msg.team or _first_team(hc_home)
-        human_name = get_default_human(hc_home)
-        team_agents = _list_team_agents(hc_home, team)
-        agent_names = {a["name"] for a in team_agents}
-        if msg.recipient not in agent_names:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
-            )
-        _send(hc_home, team, human_name, msg.recipient, msg.content)
-        _wake_daemon()
-        return {"status": "queued"}
+        def _impl():
+            team = msg.team or _first_team(hc_home)
+            human_name = get_default_human(hc_home)
+            team_agents = _list_team_agents(hc_home, team)
+            agent_names = {a["name"] for a in team_agents}
+            if msg.recipient not in agent_names:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Recipient '{msg.recipient}' is not an agent in team '{team}'",
+                )
+            _send(hc_home, team, human_name, msg.recipient, msg.content)
+            _wake_daemon()
+            return {"status": "queued"}
+        return await _run_in_db_pool(_impl)
 
     # --- Agent endpoints (team-scoped) ---
 
     @app.get("/api/agents")
-    def get_all_agents(team: str | None = None):
+    async def get_all_agents(team: str | None = None):
         """List all agents across all teams or specific team.
 
         Query params:
             team: Filter by team name, or "all" for all teams (default: all)
         """
-        # Determine which teams to query
-        if team and team != "all":
-            teams = [team]
-        else:
-            teams = _list_teams(hc_home)
+        def _impl():
+            # Determine which teams to query
+            if team and team != "all":
+                teams = [team]
+            else:
+                teams = _list_teams(hc_home)
 
-        all_agents = []
-        for t in teams:
-            all_agents.extend(_list_team_agents(hc_home, t))
-        return all_agents
+            all_agents = []
+            for t in teams:
+                all_agents.extend(_list_team_agents(hc_home, t))
+            return all_agents
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents")
-    def get_agents(team: str):
+    async def get_agents(team: str):
         """List AI agents for a team (excludes human members)."""
-        return _list_team_agents(hc_home, team)
+        def _impl():
+            return _list_team_agents(hc_home, team)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/stats")
-    def get_all_agent_stats(team: str):
+    async def get_all_agent_stats(team: str):
         """Get aggregated stats for all agents in a team (single DB query)."""
-        agents_data = _list_team_agents(hc_home, team)
-        agent_names = [a["name"] for a in agents_data]
-        return _get_team_agent_stats(hc_home, team, agent_names)
+        def _impl():
+            agents_data = _list_team_agents(hc_home, team)
+            agent_names = [a["name"] for a in agents_data]
+            return _get_team_agent_stats(hc_home, team, agent_names)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/stats")
-    def get_agent_stats(team: str, name: str):
+    async def get_agent_stats(team: str, name: str):
         """Get aggregated stats for a specific agent."""
-        return _get_agent_stats(hc_home, team, name)
+        def _impl():
+            return _get_agent_stats(hc_home, team, name)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/inbox")
-    def get_agent_inbox(team: str, name: str):
+    async def get_agent_inbox(team: str, name: str):
         """Return all messages in the agent's inbox with lifecycle status."""
-        from delegate.config import SYSTEM_USER
-        all_msgs = _read_inbox(hc_home, team, name, unread_only=False)
-        result = [
-            {
-                "id": m.id,
-                "sender": m.sender,
-                "time": m.time,
-                "body": m.body,
-                "task_id": m.task_id,
-                "delivered_at": m.delivered_at,
-                "seen_at": m.seen_at,
-                "processed_at": m.processed_at,
-            }
-            for m in all_msgs
-            if m.sender != SYSTEM_USER
-        ]
-        result.sort(key=lambda x: x["time"], reverse=True)
-        return result[:100]
+        def _impl():
+            from delegate.config import SYSTEM_USER
+            all_msgs = _read_inbox(hc_home, team, name, unread_only=False)
+            result = [
+                {
+                    "id": m.id,
+                    "sender": m.sender,
+                    "time": m.time,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "delivered_at": m.delivered_at,
+                    "seen_at": m.seen_at,
+                    "processed_at": m.processed_at,
+                }
+                for m in all_msgs
+                if m.sender != SYSTEM_USER
+            ]
+            result.sort(key=lambda x: x["time"], reverse=True)
+            return result[:100]
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/outbox")
-    def get_agent_outbox(team: str, name: str):
+    async def get_agent_outbox(team: str, name: str):
         """Return all messages sent by the agent with delivery status."""
-        all_msgs = _read_outbox(hc_home, team, name, pending_only=False)
-        result = [
-            {
-                "id": m.id,
-                "recipient": m.recipient,
-                "time": m.time,
-                "body": m.body,
-                "task_id": m.task_id,
-                "delivered_at": m.delivered_at,
-                "seen_at": m.seen_at,
-                "processed_at": m.processed_at,
-            }
-            for m in all_msgs
-        ]
-        result.sort(key=lambda x: x["time"], reverse=True)
-        return result[:100]
+        def _impl():
+            all_msgs = _read_outbox(hc_home, team, name, pending_only=False)
+            result = [
+                {
+                    "id": m.id,
+                    "recipient": m.recipient,
+                    "time": m.time,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "delivered_at": m.delivered_at,
+                    "seen_at": m.seen_at,
+                    "processed_at": m.processed_at,
+                }
+                for m in all_msgs
+            ]
+            result.sort(key=lambda x: x["time"], reverse=True)
+            return result[:100]
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/messages")
-    def get_agent_messages(team: str, name: str):
+    async def get_agent_messages(team: str, name: str):
         """Return unified inbox + outbox messages in chronological order."""
-        inbox_msgs = _read_inbox(hc_home, team, name, unread_only=False)
-        outbox_msgs = _read_outbox(hc_home, team, name, pending_only=False)
+        def _impl():
+            inbox_msgs = _read_inbox(hc_home, team, name, unread_only=False)
+            outbox_msgs = _read_outbox(hc_home, team, name, pending_only=False)
 
-        # Convert inbox messages to unified format
-        inbox_result = [
-            {
-                "id": m.id,
-                "direction": "in",
-                "counterparty": m.sender,
-                "time": m.time,
-                "body": m.body,
-                "task_id": m.task_id,
-                "delivered_at": m.delivered_at,
-                "seen_at": m.seen_at,
-                "processed_at": m.processed_at,
-            }
-            for m in inbox_msgs
-        ]
+            # Convert inbox messages to unified format
+            inbox_result = [
+                {
+                    "id": m.id,
+                    "direction": "in",
+                    "counterparty": m.sender,
+                    "time": m.time,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "delivered_at": m.delivered_at,
+                    "seen_at": m.seen_at,
+                    "processed_at": m.processed_at,
+                }
+                for m in inbox_msgs
+            ]
 
-        # Convert outbox messages to unified format
-        outbox_result = [
-            {
-                "id": m.id,
-                "direction": "out",
-                "counterparty": m.recipient,
-                "time": m.time,
-                "body": m.body,
-                "task_id": m.task_id,
-                "delivered_at": m.delivered_at,
-                "seen_at": m.seen_at,
-                "processed_at": m.processed_at,
-            }
-            for m in outbox_msgs
-        ]
+            # Convert outbox messages to unified format
+            outbox_result = [
+                {
+                    "id": m.id,
+                    "direction": "out",
+                    "counterparty": m.recipient,
+                    "time": m.time,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "delivered_at": m.delivered_at,
+                    "seen_at": m.seen_at,
+                    "processed_at": m.processed_at,
+                }
+                for m in outbox_msgs
+            ]
 
-        # Merge and sort by time (newest first)
-        all_msgs = inbox_result + outbox_result
-        all_msgs.sort(key=lambda x: x["time"], reverse=True)
-        return all_msgs[:100]
+            # Merge and sort by time (newest first)
+            all_msgs = inbox_result + outbox_result
+            all_msgs.sort(key=lambda x: x["time"], reverse=True)
+            return all_msgs[:100]
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/logs")
-    def get_agent_logs(team: str, name: str):
+    async def get_agent_logs(team: str, name: str):
         """Return the agent's worklog entries."""
-        ad = _agent_dir(hc_home, team, name)
-        if not ad.is_dir():
-            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found in team '{team}'")
+        def _impl():
+            ad = _agent_dir(hc_home, team, name)
+            if not ad.is_dir():
+                raise HTTPException(status_code=404, detail=f"Agent '{name}' not found in team '{team}'")
 
-        logs_dir = ad / "logs"
-        sessions = []
-        if logs_dir.is_dir():
-            worklog_files = [f for f in logs_dir.iterdir() if f.name.endswith(".worklog.md")]
-            worklog_files.sort(key=lambda f: int(f.name.split(".")[0]) if f.name.split(".")[0].isdigit() else 0)
+            logs_dir = ad / "logs"
+            sessions = []
+            if logs_dir.is_dir():
+                worklog_files = [f for f in logs_dir.iterdir() if f.name.endswith(".worklog.md")]
+                worklog_files.sort(key=lambda f: int(f.name.split(".")[0]) if f.name.split(".")[0].isdigit() else 0)
 
-            for f in worklog_files:
-                content = f.read_text()
-                if len(content) > 50 * 1024:
-                    content = content[-(50 * 1024):]
-                sessions.append({
-                    "filename": f.name,
-                    "content": content,
-                })
-
-        sessions.reverse()
-        return {"sessions": sessions}
-
-    @app.get("/teams/{team}/agents/{name}/reflections")
-    def get_agent_reflections(team: str, name: str):
-        """Return the agent's reflections markdown."""
-        ad = _agent_dir(hc_home, team, name)
-        if not ad.is_dir():
-            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-        path = ad / "notes" / "reflections.md"
-        content = path.read_text() if path.exists() else ""
-        return {"content": content}
-
-    @app.get("/teams/{team}/agents/{name}/journal")
-    def get_agent_journal(team: str, name: str):
-        """Return the agent's task journals (one file per task)."""
-        ad = _agent_dir(hc_home, team, name)
-        if not ad.is_dir():
-            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-        journals_dir = ad / "journals"
-        entries: list[dict] = []
-        if journals_dir.is_dir():
-            for f in sorted(journals_dir.iterdir(), reverse=True):
-                if f.suffix == ".md":
+                for f in worklog_files:
                     content = f.read_text()
                     if len(content) > 50 * 1024:
                         content = content[-(50 * 1024):]
-                    entries.append({"filename": f.name, "content": content})
-        return {"entries": entries}
+                    sessions.append({
+                        "filename": f.name,
+                        "content": content,
+                    })
+
+            sessions.reverse()
+            return {"sessions": sessions}
+        return await _run_in_db_pool(_impl)
+
+    @app.get("/teams/{team}/agents/{name}/reflections")
+    async def get_agent_reflections(team: str, name: str):
+        """Return the agent's reflections markdown."""
+        def _impl():
+            ad = _agent_dir(hc_home, team, name)
+            if not ad.is_dir():
+                raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+            path = ad / "notes" / "reflections.md"
+            content = path.read_text() if path.exists() else ""
+            return {"content": content}
+        return await _run_in_db_pool(_impl)
+
+    @app.get("/teams/{team}/agents/{name}/journal")
+    async def get_agent_journal(team: str, name: str):
+        """Return the agent's task journals (one file per task)."""
+        def _impl():
+            ad = _agent_dir(hc_home, team, name)
+            if not ad.is_dir():
+                raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+            journals_dir = ad / "journals"
+            entries: list[dict] = []
+            if journals_dir.is_dir():
+                for f in sorted(journals_dir.iterdir(), reverse=True):
+                    if f.suffix == ".md":
+                        content = f.read_text()
+                        if len(content) > 50 * 1024:
+                            content = content[-(50 * 1024):]
+                        entries.append({"filename": f.name, "content": content})
+            return {"entries": entries}
+        return await _run_in_db_pool(_impl)
 
     # --- Agent activity (ring buffer history + SSE stream) ---
 
     @app.get("/teams/{team}/agents/{name}/activity")
-    def get_agent_activity(team: str, name: str, n: int = 100):
+    async def get_agent_activity(team: str, name: str, n: int = 100):
         """Return the most recent activity entries for an agent."""
-        from delegate.activity import get_recent
-        return get_recent(team, name, n=n)
+        def _impl():
+            from delegate.activity import get_recent
+            return get_recent(team, name, n=n)
+        return await _run_in_db_pool(_impl)
 
     @app.post("/api/agents/restart-all")
     async def restart_all_agents(team: str | None = None):
@@ -3940,60 +4072,64 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     # --- Active turns snapshot (for SSE reconnect recovery) ---
 
     @app.get("/turns/active")
-    def active_turns():
+    async def active_turns():
         """Return a snapshot of all currently active agent turns.
 
         The frontend calls this on SSE connect/reconnect to recover turn
         state that may have been missed while the connection was down.
         Each entry mirrors a ``turn_started`` SSE event payload.
         """
-        from delegate.activity import get_active_turns
-        return get_active_turns()
+        def _impl():
+            from delegate.activity import get_active_turns
+            return get_active_turns()
+        return await _run_in_db_pool(_impl)
 
     # --- Shared files endpoints ---
 
     MAX_FILE_SIZE = 1_000_000  # 1 MB truncation limit
 
     @app.get("/teams/{team}/files")
-    def list_shared_files(team: str, path: str | None = None):
+    async def list_shared_files(team: str, path: str | None = None):
         """List files in the team's shared/ directory or a subdirectory."""
-        base = _shared_dir(hc_home, team)
-        if not base.is_dir():
-            return {"files": []}
+        def _impl():
+            base = _shared_dir(hc_home, team)
+            if not base.is_dir():
+                return {"files": []}
 
-        if path:
-            target = (base / path).resolve()
-            try:
-                target.relative_to(base.resolve())
-            except ValueError:
+            if path:
+                target = (base / path).resolve()
+                try:
+                    target.relative_to(base.resolve())
+                except ValueError:
+                    raise HTTPException(
+                        status_code=403, detail="Path traversal not allowed"
+                    )
+            else:
+                target = base
+
+            if not target.is_dir():
                 raise HTTPException(
-                    status_code=403, detail="Path traversal not allowed"
+                    status_code=404, detail=f"Directory not found: {path}"
                 )
-        else:
-            target = base
 
-        if not target.is_dir():
-            raise HTTPException(
-                status_code=404, detail=f"Directory not found: {path}"
-            )
+            entries = []
+            for item in target.iterdir():
+                stat = item.stat()
+                entries.append(
+                    {
+                        "name": item.name,
+                        "path": str(item.relative_to(base)),
+                        "size": stat.st_size,
+                        "modified": datetime.fromtimestamp(
+                            stat.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                        "is_dir": item.is_dir(),
+                    }
+                )
 
-        entries = []
-        for item in target.iterdir():
-            stat = item.stat()
-            entries.append(
-                {
-                    "name": item.name,
-                    "path": str(item.relative_to(base)),
-                    "size": stat.st_size,
-                    "modified": datetime.fromtimestamp(
-                        stat.st_mtime, tz=timezone.utc
-                    ).isoformat(),
-                    "is_dir": item.is_dir(),
-                }
-            )
-
-        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
-        return {"files": entries}
+            entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+            return {"files": entries}
+        return await _run_in_db_pool(_impl)
 
     def _resolve_file_path(team: str, path: str) -> Path:
         """Resolve a file path from an API ``path`` parameter.
@@ -4045,7 +4181,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         return target
 
     @app.get("/teams/{team}/files/content")
-    def read_file_content(team: str, path: str):
+    async def read_file_content(team: str, path: str):
         """Read any file and return its content as JSON.
 
         Supports absolute paths and delegate-relative paths (resolved
@@ -4054,115 +4190,119 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         For text files, returns content as string.
         For images and binary files, returns base64-encoded data with content_type.
         """
-        target = _resolve_file_path(team, path)
+        def _impl():
+            target = _resolve_file_path(team, path)
 
-        if target.is_dir():
-            entries = []
-            for item in sorted(target.iterdir(), key=lambda i: (not i.is_dir(), i.name.lower())):
-                try:
-                    stat = item.stat()
-                    entries.append({
-                        "name": item.name,
-                        "path": str(item),
-                        "size": stat.st_size,
-                        "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                        "is_dir": item.is_dir(),
-                    })
-                except OSError:
-                    continue
-            return {
-                "path": str(target),
-                "name": target.name,
-                "is_directory": True,
-                "files": entries,
+            if target.is_dir():
+                entries = []
+                for item in sorted(target.iterdir(), key=lambda i: (not i.is_dir(), i.name.lower())):
+                    try:
+                        stat = item.stat()
+                        entries.append({
+                            "name": item.name,
+                            "path": str(item),
+                            "size": stat.st_size,
+                            "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                            "is_dir": item.is_dir(),
+                        })
+                    except OSError:
+                        continue
+                return {
+                    "path": str(target),
+                    "name": target.name,
+                    "is_directory": True,
+                    "files": entries,
+                }
+
+            stat = target.stat()
+            ext = target.suffix.lower()
+
+            # Image extensions
+            image_types = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".svg": "image/svg+xml",
+                ".webp": "image/webp",
             }
 
-        stat = target.stat()
-        ext = target.suffix.lower()
+            # Common binary extensions (non-image)
+            binary_exts = {".pdf", ".zip", ".tar", ".gz", ".exe", ".bin", ".ico"}
 
-        # Image extensions
-        image_types = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".svg": "image/svg+xml",
-            ".webp": "image/webp",
-        }
+            display_path = str(target)
 
-        # Common binary extensions (non-image)
-        binary_exts = {".pdf", ".zip", ".tar", ".gz", ".exe", ".bin", ".ico"}
-
-        display_path = str(target)
-
-        if ext in image_types:
-            # Read as binary and encode as base64
-            data = target.read_bytes()
-            if len(data) > MAX_FILE_SIZE:
-                data = data[:MAX_FILE_SIZE]
-            return {
-                "path": display_path,
-                "name": target.name,
-                "size": stat.st_size,
-                "content": base64.b64encode(data).decode("utf-8"),
-                "content_type": image_types[ext],
-                "is_binary": True,
-                "modified": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
-                ).isoformat(),
-            }
-        elif ext in binary_exts:
-            # Binary file - return metadata only
-            return {
-                "path": display_path,
-                "name": target.name,
-                "size": stat.st_size,
-                "content": "",
-                "content_type": "application/octet-stream",
-                "is_binary": True,
-                "modified": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
-                ).isoformat(),
-            }
-        else:
-            # Text file - read as text
-            content = target.read_text(errors="replace")
-            if len(content) > MAX_FILE_SIZE:
-                content = content[:MAX_FILE_SIZE]
-            return {
-                "path": display_path,
-                "name": target.name,
-                "size": stat.st_size,
-                "content": content,
-                "content_type": "text/plain",
-                "is_binary": False,
-                "modified": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
-                ).isoformat(),
-            }
+            if ext in image_types:
+                # Read as binary and encode as base64
+                data = target.read_bytes()
+                if len(data) > MAX_FILE_SIZE:
+                    data = data[:MAX_FILE_SIZE]
+                return {
+                    "path": display_path,
+                    "name": target.name,
+                    "size": stat.st_size,
+                    "content": base64.b64encode(data).decode("utf-8"),
+                    "content_type": image_types[ext],
+                    "is_binary": True,
+                    "modified": datetime.fromtimestamp(
+                        stat.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                }
+            elif ext in binary_exts:
+                # Binary file - return metadata only
+                return {
+                    "path": display_path,
+                    "name": target.name,
+                    "size": stat.st_size,
+                    "content": "",
+                    "content_type": "application/octet-stream",
+                    "is_binary": True,
+                    "modified": datetime.fromtimestamp(
+                        stat.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                }
+            else:
+                # Text file - read as text
+                content = target.read_text(errors="replace")
+                if len(content) > MAX_FILE_SIZE:
+                    content = content[:MAX_FILE_SIZE]
+                return {
+                    "path": display_path,
+                    "name": target.name,
+                    "size": stat.st_size,
+                    "content": content,
+                    "content_type": "text/plain",
+                    "is_binary": False,
+                    "modified": datetime.fromtimestamp(
+                        stat.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                }
+        return await _run_in_db_pool(_impl)
 
     @app.get("/teams/{team}/files/raw")
-    def serve_raw_file(team: str, path: str):
+    async def serve_raw_file(team: str, path: str):
         """Serve a raw file (absolute or delegate-relative path).
 
         Returns the file with its native content type so browsers can render it directly.
         Used for opening HTML attachments in new tabs.
         """
-        target = _resolve_file_path(team, path)
+        def _impl():
+            target = _resolve_file_path(team, path)
 
-        # Read file content
-        file_bytes = target.read_bytes()
+            # Read file content
+            file_bytes = target.read_bytes()
 
-        # Determine content type
-        ext = target.suffix.lower()
-        if ext in (".html", ".htm"):
-            media_type = "text/html"
-        else:
-            # Use mimetypes module as fallback
-            guessed_type, _ = mimetypes.guess_type(target.name)
-            media_type = guessed_type or "application/octet-stream"
+            # Determine content type
+            ext = target.suffix.lower()
+            if ext in (".html", ".htm"):
+                media_type = "text/html"
+            else:
+                # Use mimetypes module as fallback
+                guessed_type, _ = mimetypes.guess_type(target.name)
+                media_type = guessed_type or "application/octet-stream"
 
-        return Response(content=file_bytes, media_type=media_type)
+            return Response(content=file_bytes, media_type=media_type)
+        return await _run_in_db_pool(_impl)
 
     # ===================================================================
     # /internal/* — Satellite API endpoints (bearer-token protected)
@@ -4196,31 +4336,33 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     # --- Satellite polling ---
 
     @app.get("/internal/satellite/poll")
-    def satellite_poll(satellite_id: str, _sat: str = Depends(_require_satellite_token)):
+    async def satellite_poll(satellite_id: str, _sat: str = Depends(_require_satellite_token)):
         """Return agents with unread messages whose host matches this satellite."""
-        from delegate.mailbox import agents_with_unread
-        from delegate.runtime import list_ai_agents
+        def _impl():
+            from delegate.mailbox import agents_with_unread
+            from delegate.runtime import list_ai_agents
 
-        result = []
-        for team in _list_teams(hc_home):
-            ai_agents = set(list_ai_agents(hc_home, team))
-            for agent_name in agents_with_unread(hc_home, team):
-                if agent_name not in ai_agents:
-                    continue
-                # Check if this agent is assigned to this satellite
-                ad = _agent_dir(hc_home, team, agent_name)
-                state_file = ad / "state.yaml"
-                if not state_file.exists():
-                    continue
-                state = yaml.safe_load(state_file.read_text()) or {}
-                if state.get("host") == satellite_id:
-                    result.append({
-                        "team": team,
-                        "agent": agent_name,
-                        "role": state.get("role", "engineer"),
-                        "model": state.get("model", "sonnet"),
-                    })
-        return {"agents": result}
+            result = []
+            for team in _list_teams(hc_home):
+                ai_agents = set(list_ai_agents(hc_home, team))
+                for agent_name in agents_with_unread(hc_home, team):
+                    if agent_name not in ai_agents:
+                        continue
+                    # Check if this agent is assigned to this satellite
+                    ad = _agent_dir(hc_home, team, agent_name)
+                    state_file = ad / "state.yaml"
+                    if not state_file.exists():
+                        continue
+                    state = yaml.safe_load(state_file.read_text()) or {}
+                    if state.get("host") == satellite_id:
+                        result.append({
+                            "team": team,
+                            "agent": agent_name,
+                            "role": state.get("role", "engineer"),
+                            "model": state.get("model", "sonnet"),
+                        })
+            return {"agents": result}
+        return await _run_in_db_pool(_impl)
 
     # --- Mailbox proxies ---
 
@@ -4232,9 +4374,11 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         task_id: int | None = None
 
     @app.post("/internal/mailbox/send")
-    def internal_mailbox_send(body: MailboxSendBody, _sat: str = Depends(_require_satellite_token)):
-        msg_id = _send(hc_home, body.team, body.sender, body.recipient, body.message, task_id=body.task_id)
-        return {"id": msg_id}
+    async def internal_mailbox_send(body: MailboxSendBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            msg_id = _send(hc_home, body.team, body.sender, body.recipient, body.message, task_id=body.task_id)
+            return {"id": msg_id}
+        return await _run_in_db_pool(_impl)
 
     class MailboxClaimBody(BaseModel):
         team: str
@@ -4242,47 +4386,53 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         limit: int = 50
 
     @app.post("/internal/mailbox/claim")
-    def internal_mailbox_claim(body: MailboxClaimBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.mailbox import claim_inbox_batch
-        messages = claim_inbox_batch(hc_home, body.team, body.agent, limit=body.limit)
-        return {"messages": [
-            {
-                "id": m.id,
-                "sender": m.sender,
-                "recipient": m.recipient,
-                "body": m.body,
-                "task_id": m.task_id,
-                "time": m.time,
-                "delivered_at": m.delivered_at,
-                "seen_at": m.seen_at,
-                "processed_at": m.processed_at,
-            }
-            for m in messages
-        ]}
+    async def internal_mailbox_claim(body: MailboxClaimBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.mailbox import claim_inbox_batch
+            messages = claim_inbox_batch(hc_home, body.team, body.agent, limit=body.limit)
+            return {"messages": [
+                {
+                    "id": m.id,
+                    "sender": m.sender,
+                    "recipient": m.recipient,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "time": m.time,
+                    "delivered_at": m.delivered_at,
+                    "seen_at": m.seen_at,
+                    "processed_at": m.processed_at,
+                }
+                for m in messages
+            ]}
+        return await _run_in_db_pool(_impl)
 
     class MailboxMarkProcessedBody(BaseModel):
         team: str
         message_ids: list[int]
 
     @app.post("/internal/mailbox/mark-processed")
-    def internal_mailbox_mark_processed(body: MailboxMarkProcessedBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.mailbox import mark_processed_batch
-        mark_processed_batch(hc_home, body.team, body.message_ids)
-        return {"ok": True}
+    async def internal_mailbox_mark_processed(body: MailboxMarkProcessedBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.mailbox import mark_processed_batch
+            mark_processed_batch(hc_home, body.team, body.message_ids)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     @app.get("/internal/mailbox/inbox")
-    def internal_mailbox_inbox(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
-        messages = _read_inbox(hc_home, team, agent, unread_only=True)
-        return {"messages": [
-            {
-                "id": m.id,
-                "sender": m.sender,
-                "body": m.body,
-                "task_id": m.task_id,
-                "time": m.time,
-            }
-            for m in messages
-        ]}
+    async def internal_mailbox_inbox(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            messages = _read_inbox(hc_home, team, agent, unread_only=True)
+            return {"messages": [
+                {
+                    "id": m.id,
+                    "sender": m.sender,
+                    "body": m.body,
+                    "task_id": m.task_id,
+                    "time": m.time,
+                }
+                for m in messages
+            ]}
+        return await _run_in_db_pool(_impl)
 
     # --- Task proxies ---
 
@@ -4296,31 +4446,37 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         depends_on: list[int] | None = None
 
     @app.post("/internal/task/create")
-    def internal_task_create(body: TaskCreateBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.task import create_task
-        task = create_task(
-            hc_home, body.team,
-            title=body.title,
-            assignee=body.assignee,
-            description=body.description,
-            priority=body.priority,
-            repo=body.repo,
-            depends_on=body.depends_on,
-        )
-        return task
+    async def internal_task_create(body: TaskCreateBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.task import create_task
+            task = create_task(
+                hc_home, body.team,
+                title=body.title,
+                assignee=body.assignee,
+                description=body.description,
+                priority=body.priority,
+                repo=body.repo,
+                depends_on=body.depends_on,
+            )
+            return task
+        return await _run_in_db_pool(_impl)
 
     @app.get("/internal/task/list")
-    def internal_task_list(team: str, status: str | None = None, assignee: str | None = None, _sat: str = Depends(_require_satellite_token)):
-        kwargs = {}
-        if status:
-            kwargs["status"] = status
-        if assignee:
-            kwargs["assignee"] = assignee
-        return _list_tasks(hc_home, team, **kwargs)
+    async def internal_task_list(team: str, status: str | None = None, assignee: str | None = None, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            kwargs = {}
+            if status:
+                kwargs["status"] = status
+            if assignee:
+                kwargs["assignee"] = assignee
+            return _list_tasks(hc_home, team, **kwargs)
+        return await _run_in_db_pool(_impl)
 
     @app.get("/internal/task/show")
-    def internal_task_show(team: str, task_id: int, _sat: str = Depends(_require_satellite_token)):
-        return _get_task(hc_home, team, task_id)
+    async def internal_task_show(team: str, task_id: int, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            return _get_task(hc_home, team, task_id)
+        return await _run_in_db_pool(_impl)
 
     class TaskStatusBody(BaseModel):
         team: str
@@ -4328,9 +4484,11 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         new_status: str
 
     @app.post("/internal/task/status")
-    def internal_task_status(body: TaskStatusBody, _sat: str = Depends(_require_satellite_token)):
-        _change_status(hc_home, body.team, body.task_id, body.new_status)
-        return {"ok": True}
+    async def internal_task_status(body: TaskStatusBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            _change_status(hc_home, body.team, body.task_id, body.new_status)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class TaskAssignBody(BaseModel):
         team: str
@@ -4338,9 +4496,11 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         assignee: str
 
     @app.post("/internal/task/assign")
-    def internal_task_assign(body: TaskAssignBody, _sat: str = Depends(_require_satellite_token)):
-        _update_task(hc_home, body.team, body.task_id, assignee=body.assignee)
-        return {"ok": True}
+    async def internal_task_assign(body: TaskAssignBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            _update_task(hc_home, body.team, body.task_id, assignee=body.assignee)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class TaskCommentInternalBody(BaseModel):
         team: str
@@ -4349,19 +4509,23 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         body: str
 
     @app.post("/internal/task/comment")
-    def internal_task_comment(body: TaskCommentInternalBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.task import add_comment
-        cid = add_comment(hc_home, body.team, body.task_id, body.author, body.body)
-        return {"id": cid}
+    async def internal_task_comment(body: TaskCommentInternalBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.task import add_comment
+            cid = add_comment(hc_home, body.team, body.task_id, body.author, body.body)
+            return {"id": cid}
+        return await _run_in_db_pool(_impl)
 
     class TaskCancelBody(BaseModel):
         team: str
         task_id: int
 
     @app.post("/internal/task/cancel")
-    def internal_task_cancel(body: TaskCancelBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.task import cancel_task
-        return cancel_task(hc_home, body.team, body.task_id)
+    async def internal_task_cancel(body: TaskCancelBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.task import cancel_task
+            return cancel_task(hc_home, body.team, body.task_id)
+        return await _run_in_db_pool(_impl)
 
     class TaskAttachBody(BaseModel):
         team: str
@@ -4369,13 +4533,15 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         file_path: str
 
     @app.post("/internal/task/attach")
-    def internal_task_attach(body: TaskAttachBody, _sat: str = Depends(_require_satellite_token)):
-        task = _get_task(hc_home, body.team, body.task_id)
-        attachments = list(task.get("attachments", []))
-        if body.file_path not in attachments:
-            attachments.append(body.file_path)
-        _update_task(hc_home, body.team, body.task_id, attachments=attachments)
-        return {"ok": True}
+    async def internal_task_attach(body: TaskAttachBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            task = _get_task(hc_home, body.team, body.task_id)
+            attachments = list(task.get("attachments", []))
+            if body.file_path not in attachments:
+                attachments.append(body.file_path)
+            _update_task(hc_home, body.team, body.task_id, attachments=attachments)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class TaskDetachBody(BaseModel):
         team: str
@@ -4383,29 +4549,33 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         file_path: str
 
     @app.post("/internal/task/detach")
-    def internal_task_detach(body: TaskDetachBody, _sat: str = Depends(_require_satellite_token)):
-        task = _get_task(hc_home, body.team, body.task_id)
-        attachments = list(task.get("attachments", []))
-        if body.file_path in attachments:
-            attachments.remove(body.file_path)
-        _update_task(hc_home, body.team, body.task_id, attachments=attachments)
-        return {"ok": True}
+    async def internal_task_detach(body: TaskDetachBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            task = _get_task(hc_home, body.team, body.task_id)
+            attachments = list(task.get("attachments", []))
+            if body.file_path in attachments:
+                attachments.remove(body.file_path)
+            _update_task(hc_home, body.team, body.task_id, attachments=attachments)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     # --- Repo proxy ---
 
     @app.get("/internal/repo/list")
-    def internal_repo_list(team: str, _sat: str = Depends(_require_satellite_token)):
-        from delegate.config import get_repos
-        repos = get_repos(hc_home, team)
-        result = []
-        for name, meta in repos.items():
-            result.append({
-                "name": name,
-                "source": meta.get("source", ""),
-                "remote_url": meta.get("remote_url", ""),
-                "approval": meta.get("approval", "manual"),
-            })
-        return {"repos": result}
+    async def internal_repo_list(team: str, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.config import get_repos
+            repos = get_repos(hc_home, team)
+            result = []
+            for name, meta in repos.items():
+                result.append({
+                    "name": name,
+                    "source": meta.get("source", ""),
+                    "remote_url": meta.get("remote_url", ""),
+                    "approval": meta.get("approval", "manual"),
+                })
+            return {"repos": result}
+        return await _run_in_db_pool(_impl)
 
     # --- Session & activity proxies ---
 
@@ -4415,10 +4585,12 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         task_id: int | None = None
 
     @app.post("/internal/session/start")
-    def internal_session_start(body: SessionStartBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.chat import start_session
-        session_id = start_session(hc_home, body.team, body.agent, task_id=body.task_id)
-        return {"session_id": session_id}
+    async def internal_session_start(body: SessionStartBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.chat import start_session
+            session_id = start_session(hc_home, body.team, body.agent, task_id=body.task_id)
+            return {"session_id": session_id}
+        return await _run_in_db_pool(_impl)
 
     class SessionEndBody(BaseModel):
         team: str
@@ -4430,17 +4602,19 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         cache_write_tokens: int = 0
 
     @app.post("/internal/session/end")
-    def internal_session_end(body: SessionEndBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.chat import end_session
-        end_session(
-            hc_home, body.team, body.session_id,
-            tokens_in=body.tokens_in,
-            tokens_out=body.tokens_out,
-            cost_usd=body.cost_usd,
-            cache_read_tokens=body.cache_read_tokens,
-            cache_write_tokens=body.cache_write_tokens,
-        )
-        return {"ok": True}
+    async def internal_session_end(body: SessionEndBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.chat import end_session
+            end_session(
+                hc_home, body.team, body.session_id,
+                tokens_in=body.tokens_in,
+                tokens_out=body.tokens_out,
+                cost_usd=body.cost_usd,
+                cache_read_tokens=body.cache_read_tokens,
+                cache_write_tokens=body.cache_write_tokens,
+            )
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class ActivityBroadcastBody(BaseModel):
         agent: str
@@ -4450,10 +4624,12 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         task_id: int | None = None
 
     @app.post("/internal/activity/broadcast")
-    def internal_activity_broadcast(body: ActivityBroadcastBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.activity import broadcast as _broadcast
-        _broadcast(body.agent, body.team, body.tool, body.detail, task_id=body.task_id)
-        return {"ok": True}
+    async def internal_activity_broadcast(body: ActivityBroadcastBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.activity import broadcast as _broadcast
+            _broadcast(body.agent, body.team, body.tool, body.detail, task_id=body.task_id)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class TurnEventBody(BaseModel):
         event_type: str
@@ -4463,43 +4639,47 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         sender: str = ""
 
     @app.post("/internal/activity/turn-event")
-    def internal_turn_event(body: TurnEventBody, _sat: str = Depends(_require_satellite_token)):
-        from delegate.activity import broadcast_turn_event as _bte
-        _bte(body.event_type, body.agent, team=body.team, task_id=body.task_id, sender=body.sender)
-        return {"ok": True}
+    async def internal_turn_event(body: TurnEventBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            from delegate.activity import broadcast_turn_event as _bte
+            _bte(body.event_type, body.agent, team=body.team, task_id=body.task_id, sender=body.sender)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     # --- Agent config proxy ---
 
     @app.get("/internal/agent/config")
-    def internal_agent_config(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
+    async def internal_agent_config(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
         """Return agent config needed by satellite to build prompts."""
-        ad = _agent_dir(hc_home, team, agent)
-        state_file = ad / "state.yaml"
-        if not state_file.exists():
-            raise HTTPException(status_code=404, detail=f"Agent '{agent}' not found")
+        def _impl():
+            ad = _agent_dir(hc_home, team, agent)
+            state_file = ad / "state.yaml"
+            if not state_file.exists():
+                raise HTTPException(status_code=404, detail=f"Agent '{agent}' not found")
 
-        state = yaml.safe_load(state_file.read_text()) or {}
+            state = yaml.safe_load(state_file.read_text()) or {}
 
-        # Read bio
-        bio_file = ad / "bio.md"
-        bio = bio_file.read_text() if bio_file.exists() else ""
+            # Read bio
+            bio_file = ad / "bio.md"
+            bio = bio_file.read_text() if bio_file.exists() else ""
 
-        # Read context.md
-        context_file = ad / "context.md"
-        context = context_file.read_text() if context_file.exists() else ""
+            # Read context.md
+            context_file = ad / "context.md"
+            context = context_file.read_text() if context_file.exists() else ""
 
-        # Read preamble from prompt.py
-        from delegate.prompt import Prompt
-        preamble = Prompt(hc_home, team, agent).build_preamble()
+            # Read preamble from prompt.py
+            from delegate.prompt import Prompt
+            preamble = Prompt(hc_home, team, agent).build_preamble()
 
-        return {
-            "role": state.get("role", "engineer"),
-            "model": state.get("model", "sonnet"),
-            "token_budget": state.get("token_budget"),
-            "bio": bio,
-            "context": context,
-            "preamble": preamble,
-        }
+            return {
+                "role": state.get("role", "engineer"),
+                "model": state.get("model", "sonnet"),
+                "token_budget": state.get("token_budget"),
+                "bio": bio,
+                "context": context,
+                "preamble": preamble,
+            }
+        return await _run_in_db_pool(_impl)
 
     class WriteContextBody(BaseModel):
         team: str
@@ -4507,10 +4687,12 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         content: str
 
     @app.post("/internal/agent/write-context")
-    def internal_agent_write_context(body: WriteContextBody, _sat: str = Depends(_require_satellite_token)):
-        ad = _agent_dir(hc_home, body.team, body.agent)
-        (ad / "context.md").write_text(body.content)
-        return {"ok": True}
+    async def internal_agent_write_context(body: WriteContextBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            ad = _agent_dir(hc_home, body.team, body.agent)
+            (ad / "context.md").write_text(body.content)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     class WriteWorklogBody(BaseModel):
         team: str
@@ -4519,13 +4701,15 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         content: str
 
     @app.post("/internal/agent/write-worklog")
-    def internal_agent_write_worklog(body: WriteWorklogBody, _sat: str = Depends(_require_satellite_token)):
-        ad = _agent_dir(hc_home, body.team, body.agent)
-        logs_dir = ad / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        worklog_path = logs_dir / f"{body.session_id}.worklog.md"
-        worklog_path.write_text(body.content)
-        return {"ok": True}
+    async def internal_agent_write_worklog(body: WriteWorklogBody, _sat: str = Depends(_require_satellite_token)):
+        def _impl():
+            ad = _agent_dir(hc_home, body.team, body.agent)
+            logs_dir = ad / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            worklog_path = logs_dir / f"{body.session_id}.worklog.md"
+            worklog_path.write_text(body.content)
+            return {"ok": True}
+        return await _run_in_db_pool(_impl)
 
     # ===================================================================
     # Web UI passphrase authentication middleware
@@ -4574,11 +4758,13 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     # --- Login page ---
 
     @app.get("/login", response_class=HTMLResponse)
-    def login_page():
-        from delegate.auth import is_passphrase_enabled
-        if not is_passphrase_enabled(hc_home):
-            return RedirectResponse(url="/", status_code=302)
-        return """<!DOCTYPE html>
+    async def login_page():
+        def _impl():
+            from delegate.auth import is_passphrase_enabled
+            if not is_passphrase_enabled(hc_home):
+                return RedirectResponse(url="/", status_code=302)
+            return """<!DOCTYPE html>
+        return await _run_in_db_pool(_impl)
 <html><head><title>Delegate Login</title>
 <style>
 body{background:#1e1e1e;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
@@ -4657,37 +4843,45 @@ button:hover{background:#3a8eef}
         return html
 
     @app.get("/manifest.json")
-    def manifest():
-        port = int(os.environ.get("DELEGATE_PORT", "3548"))
-        name = "Delegate" if port == 3548 else f"Delegate :{port}"
-        return JSONResponse({
-            "name": name,
-            "short_name": name,
-            "start_url": "/",
-            "display": "standalone",
-            "background_color": "#1e1e1e",
-            "theme_color": "#1e1e1e",
-            "id": "/",
-            "icons": [
-                {"src": "/static/pwa-icon-192.png", "sizes": "192x192", "type": "image/png"},
-                {"src": "/static/pwa-icon-512.png", "sizes": "512x512", "type": "image/png"},
-            ]
-        })
+    async def manifest():
+        def _impl():
+            port = int(os.environ.get("DELEGATE_PORT", "3548"))
+            name = "Delegate" if port == 3548 else f"Delegate :{port}"
+            return JSONResponse({
+                "name": name,
+                "short_name": name,
+                "start_url": "/",
+                "display": "standalone",
+                "background_color": "#1e1e1e",
+                "theme_color": "#1e1e1e",
+                "id": "/",
+                "icons": [
+                    {"src": "/static/pwa-icon-192.png", "sizes": "192x192", "type": "image/png"},
+                    {"src": "/static/pwa-icon-512.png", "sizes": "512x512", "type": "image/png"},
+                ]
+            })
+        return await _run_in_db_pool(_impl)
 
     @app.get("/sw.js")
-    def service_worker():
-        # Minimal service worker for PWA installability.
-        # Delegate requires the daemon running, so no offline caching is needed.
-        content = 'self.addEventListener("fetch", () => {});\n'
-        return Response(content=content, media_type="application/javascript")
+    async def service_worker():
+        def _impl():
+            # Minimal service worker for PWA installability.
+            # Delegate requires the daemon running, so no offline caching is needed.
+            content = 'self.addEventListener("fetch", () => {});\n'
+            return Response(content=content, media_type="application/javascript")
+        return await _run_in_db_pool(_impl)
 
     @app.get("/", response_class=HTMLResponse)
-    def index():
-        return _serve_index()
+    async def index():
+        def _impl():
+            return _serve_index()
+        return await _run_in_db_pool(_impl)
 
     # Catch-all for SPA routing (must be last to not intercept API routes)
     @app.get("/{full_path:path}", response_class=HTMLResponse)
-    def catch_all(full_path: str = ""):
-        return _serve_index()
+    async def catch_all(full_path: str = ""):
+        def _impl():
+            return _serve_index()
+        return await _run_in_db_pool(_impl)
 
     return app
