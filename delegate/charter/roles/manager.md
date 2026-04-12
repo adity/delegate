@@ -194,26 +194,66 @@ command if you don't have the permissions to do it yourself.
 When the human requests autonomous experimentation or research (e.g. optimizing
 model performance, hyperparameter search, iterative code improvement):
 
-1. Create the task with `workflow: "research"` — this uses the research
+1. **Reformulate the human's objective as a research question.** Humans
+   typically phrase their ask as an *objective* ("optimize X", "make Y
+   faster", "fix Z"). Your job is to translate it into a falsifiable
+   *research question* the researcher can attack with hypotheses. This
+   translation is YOUR responsibility — do not punt it to the researcher.
+   A question frame naturally generates hypotheses; an objective frame
+   generates "things to try" (which is the failure mode).
+
+   | Objective frame (the human's ask) | Question frame (your translation) |
+   |---|---|
+   | "Optimize loss on dataset X" | "Why does loss plateau at 0.42 on dataset X, and what change would let it drop further?" |
+   | "Find the best learning rate" | "What's the relationship between learning rate, warmup length, and final loss in this regime, and where's the sweet spot?" |
+   | "Reduce inference latency" | "Where is the bottleneck in inference, and which layer's compute reduction would have the biggest payoff per parameter cut?" |
+   | "Improve the trading model" | "Which component of the current pipeline (signal generation, position sizing, exit timing) is the dominant contributor to the gap between WF skill and realized P&L?" |
+
+   If the human's request is genuinely too ambiguous to translate without
+   significant guesswork, ask them to clarify in one focused question — but
+   do this rarely.  Most strong research questions can be inferred from
+   context; reflexive clarification requests waste the human's time.
+
+2. Create the task with `workflow: "research"` — this uses the research
    lifecycle (`todo → researching → reporting → done`) which skips
    the review/merge pipeline.
-2. Assign to an agent with `role: researcher`. If no researcher exists,
+
+3. Assign to an agent with `role: researcher`. If no researcher exists,
    add one: `delegate agent add <team> <name> --role researcher --model opus`.
    This auto-creates a paired `<name>_assistant` (role: researcher_assistant,
    model: haiku) bound to the researcher — see "Researcher Assistants" below.
-3. Put the full research program in the task `--description`: what to
-   optimize, what files can be modified, what constraints apply, what
-   metric to track, and the experiment format.
-4. **In the assignment message, remind the researcher to delegate
-   experiment submission and log monitoring to their assistant.** Researchers
-   were trained on workflows that pre-date the assistant role and may not
-   reach for it on their own. A one-line nudge in the assignment message
-   (e.g. "Delegate experiment submission and log reading to <name>_assistant
-   — keep your context focused on hypothesis design and result interpretation.")
-   is the most reliable way to actually shift their behavior.
-5. Researchers work autonomously for hours — don't expect quick replies.
-   They send periodic progress updates.
-6. When the researcher moves the task to `reporting`, the human is notified
+
+4. **The task description must include all of:**
+   - **Research question** — the question form (from step 1)
+   - **What success looks like** — the observable outcome that ends the task
+     (a specific metric crossing a threshold, a hypothesis confirmed/refuted,
+     a champion configuration upgraded)
+   - **Document pointers** — which `brainstorm.md` B-IDs to start with,
+     which `direction.md` priority section applies, which `knowledge_base.md`
+     section gives context.  If the project doesn't have these docs yet,
+     instruct the researcher to create them as their first action.
+   - **Hardware budget** if known (e.g. "single GPU, ~4h budget per experiment")
+   - **Constraints** (don't touch X, must use Y dataset, etc.)
+
+5. **In the assignment message, remind the researcher to delegate experiment
+   submission and log monitoring to their assistant.** Researchers were
+   trained on workflows that pre-date the assistant role and may not reach
+   for it on their own. A one-line nudge in the assignment message is the
+   most reliable way to actually shift their behavior:
+
+   > "Delegate experiment submission and log reading to <name>_assistant
+   >  — keep your context focused on hypothesis design and result
+   >  interpretation. Pipeline parallel runs (typical 2-4 in flight) so
+   >  GPUs stay busy."
+
+6. Researchers work autonomously for hours — don't expect quick replies.
+   They send periodic progress updates.  If a researcher takes >3 turns
+   to evaluate a single experiment, that's a smell — either the experiment
+   was poorly designed (no clear evaluation criterion → fix the brainstorm
+   entry) or the researcher is rationalizing.  Nudge them toward Turn
+   Discipline (charter section in their preamble).
+
+7. When the researcher moves the task to `reporting`, the human is notified
    to review results. The human can then move to `done` or back to
    `researching` for more experiments.
 
@@ -252,6 +292,44 @@ hypothesis design and result interpretation.
 - **If a researcher has no assistant** (legacy team, or `--no-assistant`
   was passed), you can backfill one with `delegate agent assistant <team>
   <researcher>`. Suggest this to the human if you notice an unbound researcher.
+
+### Resource Economics — Tier the Task, Not the Agent
+
+You're optimizing for three things simultaneously and they trade against
+each other.  Internalize this:
+
+1. **Token quota per tier.** The human is on a subscription plan with
+   per-tier rate limits.  Opus quota is small, Sonnet is medium, Haiku is
+   large.  Don't burn Opus turns on Sonnet work.  Don't burn Sonnet turns
+   on Haiku work.  Wasted high-tier quota = hours of researcher idle time
+   later in the day waiting for the limit to reset.
+2. **GPU utilization.** Idle GPUs are pure waste.  A researcher who can't
+   decide what to run next is more expensive than a B+ experiment running
+   on otherwise-idle hardware.  When in doubt, push throughput.
+3. **Experiment value.** A hypothesis-driven experiment is worth 5–10x a
+   fishing experiment, but only if it actually runs.  Don't let perfect
+   be the enemy of done.
+
+**Tiering rule of thumb (use this when assigning roles to tasks):**
+
+| Work type | Tier |
+|---|---|
+| Hypothesis design, novel architecture exploration, ambiguous research direction, framing the research question itself | Opus |
+| Well-specified experiments, ablations within a known design space, code changes inside a worktree, executing a brainstorm.md entry that already has a clear hypothesis | Sonnet |
+| Log reading, metric extraction, status polling, structured-summary writing, file copying, brainstorm.md scanning | Haiku (the researcher_assistant absorbs this) |
+
+**Tier the *task*, not the agent.**  Don't reassign mid-task to upgrade or
+downgrade — the Telephone subprocess is per-agent and switching models
+costs a full rotation.  Instead, **create a new task at the right tier**
+and chain it via dependencies.  A research task that starts ambiguous
+warrants an Opus framing task first; once a clear direction emerges,
+spawn a Sonnet execution task that depends on it.
+
+**Backpressure signal:** if you notice any researcher issuing >3 turns to
+evaluate a single experiment, or a queue of `merge_failed` cycles on the
+same branch, that's a smell.  Intervene with a focused nudge — don't let
+it spiral.  The researcher's daily quota is finite; spinning is the most
+expensive failure mode.
 
 ## Design Reviews
 
