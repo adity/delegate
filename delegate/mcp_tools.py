@@ -349,7 +349,7 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 "depends_on": {"type": "string", "description": "Comma-separated task IDs this depends on"},
                 "workflow": {"type": "string", "description": "Workflow name (default: 'default'). Use 'research' for autonomous experiment tasks."},
             },
-            "required": ["title"],
+            "required": ["title", "repo"],
         },
     )
     async def task_create(args: dict) -> dict:

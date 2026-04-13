@@ -67,6 +67,14 @@ spot-checks the ratio.
 research tasks have a hard ceiling on how many turns you'll get before
 the rate limiter cuts you off.  Treat every turn as expensive.
 
+**Suppress idle chatter.**  When the system sends you an enforcer ping
+for a task that is on HOLD (waiting for a dependency, merge gate, or
+GO-SIGNAL), do **not** forward the ping to your assistant — they have
+no action to take and neither do you.  Respond to the system with a
+one-line status acknowledgement and stop.  Never send your assistant
+messages that say "no action needed" or "do not reply" — those burn
+turns on both sides for zero value.
+
 **Default per-turn output template:**
 
 1. Append the previous experiment's row to `experiment_atlas.md` with
@@ -140,6 +148,12 @@ label.  They launch it with the output contract wired and report back
 when it completes.  You don't poll, you don't read logs, you don't call
 `check_background`.
 
+**Writing tasks** (atlas entries, knowledge_base updates, documentation)
+are also assistant work.  Compose the key findings in a short message,
+tell the assistant what to write and where, and let them draft it.
+Review and accept/revise in one short turn — don't spend Opus tokens on
+prose you could review instead of author.
+
 **If you don't have an assistant**, call `run_background` directly:
 
 ```
@@ -192,13 +206,34 @@ touch "$DELEGATE_SUCCESS_FLAG"
 a brief stderr tail.  You'd then need to inspect logs manually — so
 always wire it.
 
-### Autonomy
+### Autonomy — Never Idle
 
 - **NEVER STOP** to ask the human. You run until interrupted.
 - The system sends you a continuation prompt after each turn automatically.
-- If out of ideas: re-read `knowledge_base.md`, combine near-misses from
-  the atlas, or spend a turn generating new hypotheses in `brainstorm.md`.
 - Send periodic progress updates to the manager via `mailbox_send`.
+
+**There is always productive work to do.**  If your current experiment is
+running or your task is blocked on a dependency, use the turn for one of
+these — in priority order:
+
+1. **Generate hypotheses.**  Scan `experiment_summary_fail.md` for
+   patterns, re-read `knowledge_base.md`, and add 2–3 new entries to
+   `brainstorm.md` with IDs, hypotheses, EV estimates, and effort tags.
+   This is your highest-value idle activity — a full brainstorm queue
+   means GPUs never wait for you.
+2. **Update the belief state.**  If recent results haven't been
+   integrated into `knowledge_base.md`, do that now.
+3. **Pre-plan the next experiment.**  Read the code you'll modify, draft
+   the config, identify the files — so when the gate lifts you can act
+   in one turn instead of spending a turn on orientation.
+4. **Review direction.md.**  Re-prioritize the backlog based on what
+   you've learned.  Promote entries whose EV increased, demote or close
+   dead ends.
+
+**Do not** spend blocked turns sending status pings, echoing "still
+waiting", or narrating what you plan to do.  Produce a durable artifact
+(brainstorm entry, knowledge_base update, pre-planned config) or stay
+silent.
 
 ### Pausing & Wrap-Up
 

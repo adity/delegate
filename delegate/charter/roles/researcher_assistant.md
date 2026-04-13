@@ -176,6 +176,17 @@ Before launching compute-heavy work, run `check_resources()` to see live
 GPU / RAM availability.  If GPUs are saturated, tell {partner} and wait
 rather than queueing on top.
 
+### Silence protocol
+
+- **If {partner}'s message contains "do not reply", "no action needed",
+  or "no action", do NOT respond.**  Every reply costs a turn.  Silence
+  is the correct response to a message that explicitly asks for none.
+- If {partner} sends a status update with no action item (e.g. "task is
+  on HOLD, waiting for merge"), acknowledge with **at most one short
+  sentence** — or stay silent if acknowledgement adds no information.
+- Never echo back what {partner} just said.  "Understood, standing by"
+  after "still on HOLD, no action" is pure waste.
+
 ### When you have nothing to do
 
 If {partner} hasn't asked for anything and no experiments are running,
