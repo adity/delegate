@@ -80,6 +80,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _db_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="delegate-db")
 
+# Small dedicated pool for HTTP API requests so the UI never waits behind
+# bulk daemon work (agent turns, merge ops, infra provisioning) that can
+# saturate _db_pool for seconds at a time.
+_api_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="delegate-api")
+
+
+async def _run_in_api_pool(fn, *args, **kwargs):
+    """Run *fn* in the dedicated HTTP API thread pool.
+
+    Identical semantics to ``_run_in_db_pool`` (shield + cancel safety)
+    but uses a separate 4-thread pool reserved for user-facing HTTP
+    requests.  This guarantees the UI stays responsive even when the
+    daemon pool is fully occupied with agent turns or merge operations.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_api_pool, functools.partial(fn, *args, **kwargs))
+    return await asyncio.shield(fut)
+
 
 async def _run_in_db_pool(fn, *args, **kwargs):
     """Run *fn(*args, **kwargs)* in the dedicated DB/IO thread pool.
@@ -1572,7 +1590,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 "hc_home": str(hc_home),
                 "bootstrap_id": _get_bootstrap_id(hc_home),
             }
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Bootstrap endpoint (all initial data in one call) ---
 
@@ -1686,7 +1704,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 }
 
             return result
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Team endpoints ---
 
@@ -1696,7 +1714,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
         Returns: List of team objects with name, team_id, created_at, agent_count, task_count
         """
-        return await _run_in_db_pool(_get_teams_list)
+        return await _run_in_api_pool(_get_teams_list)
 
     # --- Reviewer endpoints ---
 
@@ -1706,7 +1724,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.config import get_reviewer_config
             return get_reviewer_config(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/reviewer")
     async def post_reviewer(team: str, body: dict):
@@ -1723,7 +1741,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if "auto_merge" in body:
                 kwargs["auto_merge"] = bool(body["auto_merge"])
             return update_reviewer_config(hc_home, team, **kwargs)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Auto-approver endpoints (deprecated — kept for backwards compat) ---
 
@@ -1733,7 +1751,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.config import get_auto_approver_config
             return get_auto_approver_config(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/auto-approver")
     async def post_auto_approver(team: str, body: dict):
@@ -1748,7 +1766,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if "model" in body:
                 kwargs["model"] = str(body["model"])
             return update_auto_approver_config(hc_home, team, **kwargs)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Task-freeze endpoints ---
 
@@ -1758,7 +1776,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.config import get_task_freeze_config
             return get_task_freeze_config(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/task-freeze")
     async def post_task_freeze(team: str, body: dict):
@@ -1769,7 +1787,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if "enabled" in body:
                 kwargs["enabled"] = bool(body["enabled"])
             return update_task_freeze_config(hc_home, team, **kwargs)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Max-tasks limit endpoints ---
 
@@ -1779,7 +1797,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.config import get_max_tasks_config
             return get_max_tasks_config(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/max-tasks")
     async def post_max_tasks(team: str, body: dict):
@@ -1794,7 +1812,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if "limit_queued" in body:
                 kwargs["limit_queued"] = int(body["limit_queued"])
             return update_max_tasks_config(hc_home, team, **kwargs)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Workflow endpoints (team-scoped) ---
 
@@ -1804,7 +1822,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.workflow import list_workflows as _list_wf
             return _list_wf(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/workflows/{name}")
     async def get_team_workflow(team: str, name: str, version: int | None = None):
@@ -1839,7 +1857,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 "initial": wf.initial_stage,
                 "terminals": sorted(wf.terminal_stages),
             }
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Task endpoints (team-scoped) ---
 
@@ -1847,7 +1865,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
     async def get_team_tasks(team: str, status: str | None = None, assignee: str | None = None):
         def _impl():
             return _list_tasks(hc_home, team, status=status, assignee=assignee)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/tasks/merge-order")
     async def get_merge_order(team: str):
@@ -1856,7 +1874,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             all_approval = _list_tasks(hc_home, team, status="in_approval")
             sorted_tasks = _sort_merge_candidates(hc_home, team, all_approval)
             return {"order": [t["id"] for t in sorted_tasks]}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Message endpoints (team-scoped) ---
 
@@ -1869,7 +1887,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 if len(parts) == 2:
                     between_tuple = (parts[0], parts[1])
             return _get_messages(hc_home, team, since=since, between=between_tuple, msg_type=type, limit=limit, before_id=before_id)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class SendMessage(BaseModel):
         team: str | None = None
@@ -1891,7 +1909,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             _send(hc_home, team, human_name, msg.recipient, msg.content)
             _wake_daemon()
             return {"status": "queued"}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/greet")
     async def greet_team(team: str, last_seen: str | None = None):
@@ -1991,7 +2009,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 manager_name, human_name, team, last_seen or "none",
             )
             return {"status": "sent"}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- File upload endpoints ---
 
@@ -2139,7 +2157,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 headers["Content-Security-Policy"] = "default-src 'none'"
 
             return Response(content=content, headers=headers, media_type=mime_type)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/cost-summary")
     async def get_cost_summary(team: str):
@@ -2225,7 +2243,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 },
                 "top_tasks": top_tasks,
             }
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Magic commands endpoints ---
 
@@ -2252,7 +2270,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(exc))
             resolved_model = req.model or "sonnet"
             return {"message": f"Added agent '{agent_name}' to team '{team}' (role: {req.role or 'engineer'}, model: {resolved_model})"}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Project (team) creation from UI ---
 
@@ -2450,7 +2468,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             broadcast_teams_refresh()
 
             return {"name": name, "status": "created"}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.delete("/projects/{name}")
     async def delete_project(name: str):
@@ -2513,7 +2531,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             broadcast_teams_refresh()
 
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Cleanup endpoints ---
 
@@ -2524,7 +2542,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.cleanup import preview_cleanup
             preview = preview_cleanup(hc_home, team_name=team, max_age_days=max_age)
             return preview.to_dict()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/teams/{team}/cleanup")
     async def cleanup_team(team: str, max_age: int = 14):
@@ -2533,7 +2551,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.cleanup import run_cleanup
             result = run_cleanup(hc_home, team_name=team, max_age_days=max_age)
             return result.to_dict()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/cleanup/preview")
     async def cleanup_preview_all(max_age: int = 14):
@@ -2542,7 +2560,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.cleanup import preview_cleanup
             preview = preview_cleanup(hc_home, max_age_days=max_age)
             return preview.to_dict()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/cleanup")
     async def cleanup_all(max_age: int = 14):
@@ -2551,7 +2569,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.cleanup import run_cleanup
             result = run_cleanup(hc_home, max_age_days=max_age)
             return result.to_dict()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/default-cwd")
     async def get_default_cwd(team: str):
@@ -2572,7 +2590,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     cwd = str(first_repo.resolve()) if first_repo.is_symlink() else str(first_repo)
                     return {"cwd": cwd}
             return {"cwd": str(Path.home())}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class ShellExecRequest(BaseModel):
         command: str
@@ -2661,7 +2679,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     status_code=400,
                     detail=f"Command execution failed: {str(e)}"
                 )
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class CommandMessage(BaseModel):
         command: str
@@ -2691,7 +2709,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             conn.close()
 
             return {"id": msg_id}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Legacy global endpoints (aggregate across all teams) ---
     # Prefixed with /api/ to avoid colliding with SPA routes (/tasks, /agents).
@@ -2763,7 +2781,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     pass
 
             return {"current": current, "latest": latest, "update_available": update_available}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks")
     async def get_tasks(status: str | None = None, assignee: str | None = None, team: str | None = None):
@@ -2794,7 +2812,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             # Sort by updated_at desc
             all_tasks.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
             return all_tasks
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Pydantic models for request bodies ---
 
@@ -2834,7 +2852,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     logger.exception("Unexpected error in get_task_global for task %d team %s", task_id, t)
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/stats")
     async def get_task_stats_global(task_id: int):
@@ -2855,7 +2873,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     logger.exception("Unexpected error in get_task_stats_global for task %d team %s", task_id, t)
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/diff")
     async def get_task_diff_global(task_id: int):
@@ -2872,7 +2890,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     logger.exception("Unexpected error in get_task_diff_global for task %d team %s", task_id, t)
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/activity")
     async def get_task_activity_global(task_id: int, limit: int | None = None):
@@ -2890,7 +2908,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     logger.exception("Unexpected error in get_task_activity_global for task %d team %s", task_id, t)
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/approve")
     async def approve_task_global(task_id: int, body: ApproveBody | None = None):
@@ -2913,7 +2931,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/reject")
     async def reject_task_global(task_id: int, body: RejectBody):
@@ -2940,7 +2958,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/comments")
     async def get_task_comments_global(task_id: int, limit: int = 50):
@@ -2954,7 +2972,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/comments")
     async def post_task_comment_global(task_id: int, comment: TaskCommentBody):
@@ -2978,7 +2996,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/merge-preview")
     async def get_task_merge_preview_global(task_id: int):
@@ -2996,7 +3014,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/commits")
     async def get_task_commits_global(task_id: int):
@@ -3010,7 +3028,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/retry-merge")
     async def retry_merge_global(task_id: int):
@@ -3033,7 +3051,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/cancel")
     async def cancel_task_global(task_id: int):
@@ -3048,7 +3066,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except (FileNotFoundError, ValueError):
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/reviews")
     async def get_task_reviews_global(task_id: int):
@@ -3065,7 +3083,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/reviews/current")
     async def get_task_current_review_global(task_id: int):
@@ -3082,7 +3100,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/tasks/{task_id}/reviews/comments")
     async def post_review_comment_global(task_id: int, comment: ReviewCommentBody):
@@ -3105,7 +3123,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.put("/api/tasks/{task_id}/reviews/comments/{comment_id}")
     async def edit_review_comment_global(task_id: int, comment_id: int, payload: ReviewCommentUpdateBody):
@@ -3122,7 +3140,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.delete("/api/tasks/{task_id}/reviews/comments/{comment_id}")
     async def remove_review_comment_global(task_id: int, comment_id: int):
@@ -3139,7 +3157,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 except FileNotFoundError:
                     continue
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # ---------------------------------------------------------------------------
     # Reviewer edit endpoints
@@ -3218,7 +3236,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 return {"content": content, "head_sha": head_sha}
 
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class ReviewerEdit(BaseModel):
         file: str
@@ -3436,7 +3454,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                         pass
 
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # ---------------------------------------------------------------------------
     # File completion endpoints
@@ -3521,7 +3539,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             lim = min(max(1, limit), _COMPLETION_MAX_LIMIT)
             entries = _list_completions(p, lim)
             return {"entries": entries}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/tasks/{task_id}/files/complete")
     async def get_task_files_complete(task_id: int, q: str = "", limit: int = 20):
@@ -3595,7 +3613,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 return {"entries": rel_entries}
 
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/api/messages")
     async def get_messages(since: str | None = None, between: str | None = None, type: str | None = None, limit: int | None = None, before_id: int | None = None, team: str | None = None):
@@ -3635,7 +3653,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if limit:
                 all_msgs = all_msgs[:limit]
             return all_msgs
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/messages")
     async def post_message(msg: SendMessage):
@@ -3653,7 +3671,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             _send(hc_home, team, human_name, msg.recipient, msg.content)
             _wake_daemon()
             return {"status": "queued"}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Agent endpoints (team-scoped) ---
 
@@ -3675,14 +3693,14 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             for t in teams:
                 all_agents.extend(_list_team_agents(hc_home, t))
             return all_agents
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents")
     async def get_agents(team: str):
         """List AI agents for a team (excludes human members)."""
         def _impl():
             return _list_team_agents(hc_home, team)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/stats")
     async def get_all_agent_stats(team: str):
@@ -3691,14 +3709,14 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             agents_data = _list_team_agents(hc_home, team)
             agent_names = [a["name"] for a in agents_data]
             return _get_team_agent_stats(hc_home, team, agent_names)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/stats")
     async def get_agent_stats(team: str, name: str):
         """Get aggregated stats for a specific agent."""
         def _impl():
             return _get_agent_stats(hc_home, team, name)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/inbox")
     async def get_agent_inbox(team: str, name: str):
@@ -3722,7 +3740,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             ]
             result.sort(key=lambda x: x["time"], reverse=True)
             return result[:100]
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/outbox")
     async def get_agent_outbox(team: str, name: str):
@@ -3744,7 +3762,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             ]
             result.sort(key=lambda x: x["time"], reverse=True)
             return result[:100]
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/messages")
     async def get_agent_messages(team: str, name: str):
@@ -3789,7 +3807,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             all_msgs = inbox_result + outbox_result
             all_msgs.sort(key=lambda x: x["time"], reverse=True)
             return all_msgs[:100]
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/logs")
     async def get_agent_logs(team: str, name: str):
@@ -3816,7 +3834,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
             sessions.reverse()
             return {"sessions": sessions}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/reflections")
     async def get_agent_reflections(team: str, name: str):
@@ -3828,7 +3846,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             path = ad / "notes" / "reflections.md"
             content = path.read_text() if path.exists() else ""
             return {"content": content}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/agents/{name}/journal")
     async def get_agent_journal(team: str, name: str):
@@ -3847,7 +3865,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                             content = content[-(50 * 1024):]
                         entries.append({"filename": f.name, "content": content})
             return {"entries": entries}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Agent activity (ring buffer history + SSE stream) ---
 
@@ -3857,7 +3875,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.activity import get_recent
             return get_recent(team, name, n=n)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.post("/api/agents/restart-all")
     async def restart_all_agents(team: str | None = None):
@@ -4096,7 +4114,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.activity import get_active_turns
             return get_active_turns()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Shared files endpoints ---
 
@@ -4143,7 +4161,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
 
             entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
             return {"files": entries}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     def _resolve_file_path(team: str, path: str) -> Path:
         """Resolve a file path from an API ``path`` parameter.
@@ -4291,7 +4309,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                         stat.st_mtime, tz=timezone.utc
                     ).isoformat(),
                 }
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/teams/{team}/files/raw")
     async def serve_raw_file(team: str, path: str):
@@ -4316,7 +4334,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 media_type = guessed_type or "application/octet-stream"
 
             return Response(content=file_bytes, media_type=media_type)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # ===================================================================
     # /internal/* — Satellite API endpoints (bearer-token protected)
@@ -4376,7 +4394,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                             "model": state.get("model", "sonnet"),
                         })
             return {"agents": result}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Mailbox proxies ---
 
@@ -4392,7 +4410,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             msg_id = _send(hc_home, body.team, body.sender, body.recipient, body.message, task_id=body.task_id)
             return {"id": msg_id}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class MailboxClaimBody(BaseModel):
         team: str
@@ -4418,7 +4436,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 }
                 for m in messages
             ]}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class MailboxMarkProcessedBody(BaseModel):
         team: str
@@ -4430,7 +4448,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.mailbox import mark_processed_batch
             mark_processed_batch(hc_home, body.team, body.message_ids)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/internal/mailbox/inbox")
     async def internal_mailbox_inbox(team: str, agent: str, _sat: str = Depends(_require_satellite_token)):
@@ -4446,7 +4464,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 }
                 for m in messages
             ]}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Task proxies ---
 
@@ -4473,7 +4491,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 depends_on=body.depends_on,
             )
             return task
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/internal/task/list")
     async def internal_task_list(team: str, status: str | None = None, assignee: str | None = None, _sat: str = Depends(_require_satellite_token)):
@@ -4484,13 +4502,13 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if assignee:
                 kwargs["assignee"] = assignee
             return _list_tasks(hc_home, team, **kwargs)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/internal/task/show")
     async def internal_task_show(team: str, task_id: int, _sat: str = Depends(_require_satellite_token)):
         def _impl():
             return _get_task(hc_home, team, task_id)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskStatusBody(BaseModel):
         team: str
@@ -4502,7 +4520,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             _change_status(hc_home, body.team, body.task_id, body.new_status)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskAssignBody(BaseModel):
         team: str
@@ -4514,7 +4532,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             _update_task(hc_home, body.team, body.task_id, assignee=body.assignee)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskCommentInternalBody(BaseModel):
         team: str
@@ -4528,7 +4546,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.task import add_comment
             cid = add_comment(hc_home, body.team, body.task_id, body.author, body.body)
             return {"id": cid}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskCancelBody(BaseModel):
         team: str
@@ -4539,7 +4557,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
         def _impl():
             from delegate.task import cancel_task
             return cancel_task(hc_home, body.team, body.task_id)
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskAttachBody(BaseModel):
         team: str
@@ -4555,7 +4573,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 attachments.append(body.file_path)
             _update_task(hc_home, body.team, body.task_id, attachments=attachments)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TaskDetachBody(BaseModel):
         team: str
@@ -4571,7 +4589,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 attachments.remove(body.file_path)
             _update_task(hc_home, body.team, body.task_id, attachments=attachments)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Repo proxy ---
 
@@ -4589,7 +4607,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                     "approval": meta.get("approval", "manual"),
                 })
             return {"repos": result}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Session & activity proxies ---
 
@@ -4604,7 +4622,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.chat import start_session
             session_id = start_session(hc_home, body.team, body.agent, task_id=body.task_id)
             return {"session_id": session_id}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class SessionEndBody(BaseModel):
         team: str
@@ -4628,7 +4646,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 cache_write_tokens=body.cache_write_tokens,
             )
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class ActivityBroadcastBody(BaseModel):
         agent: str
@@ -4643,7 +4661,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.activity import broadcast as _broadcast
             _broadcast(body.agent, body.team, body.tool, body.detail, task_id=body.task_id)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class TurnEventBody(BaseModel):
         event_type: str
@@ -4658,7 +4676,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             from delegate.activity import broadcast_turn_event as _bte
             _bte(body.event_type, body.agent, team=body.team, task_id=body.task_id, sender=body.sender)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # --- Agent config proxy ---
 
@@ -4693,7 +4711,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
                 "context": context,
                 "preamble": preamble,
             }
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class WriteContextBody(BaseModel):
         team: str
@@ -4706,7 +4724,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             ad = _agent_dir(hc_home, body.team, body.agent)
             (ad / "context.md").write_text(body.content)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     class WriteWorklogBody(BaseModel):
         team: str
@@ -4723,7 +4741,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             worklog_path = logs_dir / f"{body.session_id}.worklog.md"
             worklog_path.write_text(body.content)
             return {"ok": True}
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # ===================================================================
     # Web UI passphrase authentication middleware
@@ -4778,7 +4796,7 @@ def create_app(hc_home: Path | None = None) -> FastAPI:
             if not is_passphrase_enabled(hc_home):
                 return RedirectResponse(url="/", status_code=302)
             return """<!DOCTYPE html>
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 <html><head><title>Delegate Login</title>
 <style>
 body{background:#1e1e1e;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
@@ -4874,7 +4892,7 @@ button:hover{background:#3a8eef}
                     {"src": "/static/pwa-icon-512.png", "sizes": "512x512", "type": "image/png"},
                 ]
             })
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/sw.js")
     async def service_worker():
@@ -4883,19 +4901,19 @@ button:hover{background:#3a8eef}
             # Delegate requires the daemon running, so no offline caching is needed.
             content = 'self.addEventListener("fetch", () => {});\n'
             return Response(content=content, media_type="application/javascript")
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
         def _impl():
             return _serve_index()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     # Catch-all for SPA routing (must be last to not intercept API routes)
     @app.get("/{full_path:path}", response_class=HTMLResponse)
     async def catch_all(full_path: str = ""):
         def _impl():
             return _serve_index()
-        return await _run_in_db_pool(_impl)
+        return await _run_in_api_pool(_impl)
 
     return app
