@@ -850,7 +850,7 @@ def _generate_python_root_setup(components: list[_Component], root_python: _Comp
         lines.append("fi")
 
     lines.append("")
-    lines.append('source "$VENV_DIR/bin/activate"')
+    lines.append('. "$VENV_DIR/bin/activate"')
     lines.append('export PYTHONPATH="$WORKTREE_ROOT${PYTHONPATH:+:$PYTHONPATH}"')
 
     # Other components (subdirs or root non-Python — unlikely but possible)

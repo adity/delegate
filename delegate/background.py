@@ -191,7 +191,7 @@ def launch(
     merged_env[ENV_SUCCESS_FLAG] = str(_success_flag_path(agent_dir, handle))
 
     proc = subprocess.Popen(
-        ["sh", "-c", wrapper],
+        ["bash", "-c", wrapper],
         cwd=cwd or str(agent_dir),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
