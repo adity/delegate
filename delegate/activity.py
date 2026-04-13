@@ -19,6 +19,7 @@ for the team they are watching.
 
 import asyncio
 import logging
+import time as _time
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -252,29 +253,19 @@ def mark_thinking_tool_break(agent: str, team: str) -> None:
     _thinking_had_tools[(team, agent)] = True
 
 
-def broadcast_thinking(
-    agent: str,
-    team: str,
-    text: str,
-    *,
-    task_id: int | None = None,
-) -> None:
-    """Broadcast accumulated thinking text to SSE clients (ephemeral, not stored).
+_THINKING_DEBOUNCE_S = 0.15  # 150ms — coalesce rapid text fragments
 
-    Called from the turn execution loop for every text block in the SDK
-    response stream.  Each call appends to a per-agent buffer and sends
-    the full accumulated text so the frontend can render a continuous
-    scrolling stream.
+# Tracks pending debounce handles so we can cancel on new text arrival.
+_thinking_debounce_handles: dict[tuple[str, str], asyncio.TimerHandle] = {}
 
-    If tool calls happened since the last thinking append, a paragraph
-    break (``---``) is inserted to visually separate logical blocks.
-    """
-    key = (team, agent)
-    buf = _thinking_buffer.get(key, "")
-    if buf and _thinking_had_tools.pop(key, False):
-        buf += "\n\n---\n\n"
-    buf += text
-    _thinking_buffer[key] = buf
+
+def _flush_thinking(key: tuple[str, str], task_id: int | None) -> None:
+    """Push the current thinking buffer to SSE subscribers (called by timer)."""
+    _thinking_debounce_handles.pop(key, None)
+    buf = _thinking_buffer.get(key)
+    if not buf:
+        return
+    team, agent = key
     payload = {
         "type": "agent_thinking",
         "agent": agent,
@@ -286,10 +277,60 @@ def broadcast_thinking(
     _push_to_subscribers(payload)
 
 
+def broadcast_thinking(
+    agent: str,
+    team: str,
+    text: str,
+    *,
+    task_id: int | None = None,
+) -> None:
+    """Broadcast accumulated thinking text to SSE clients (ephemeral, not stored).
+
+    Called from the turn execution loop for every text block in the SDK
+    response stream.  Text is accumulated in a per-agent buffer and
+    flushed to subscribers on a 150ms debounce timer so rapid fragments
+    are coalesced into a single push (reduces event loop wakeups by ~90%
+    during active agent turns).
+
+    If tool calls happened since the last thinking append, a paragraph
+    break (``---``) is inserted to visually separate logical blocks.
+    """
+    key = (team, agent)
+    buf = _thinking_buffer.get(key, "")
+    if buf and _thinking_had_tools.pop(key, False):
+        buf += "\n\n---\n\n"
+    buf += text
+    _thinking_buffer[key] = buf
+
+    # Cancel any pending flush and schedule a new one.
+    old_handle = _thinking_debounce_handles.pop(key, None)
+    if old_handle is not None:
+        old_handle.cancel()
+    try:
+        loop = asyncio.get_running_loop()
+        _thinking_debounce_handles[key] = loop.call_later(
+            _THINKING_DEBOUNCE_S, _flush_thinking, key, task_id,
+        )
+    except RuntimeError:
+        # No running loop (e.g. during tests) — flush immediately.
+        _flush_thinking(key, task_id)
+
+
 def clear_thinking_buffer(agent: str, team: str) -> None:
-    """Clear the accumulated thinking buffer for an agent (call on turn end)."""
-    _thinking_buffer.pop((team, agent), None)
-    _thinking_had_tools.pop((team, agent), None)
+    """Clear the accumulated thinking buffer for an agent (call on turn end).
+
+    Cancels any pending debounce timer and flushes the final state before
+    clearing so the frontend sees the complete thinking output.
+    """
+    key = (team, agent)
+    # Cancel pending timer and flush final state.
+    old_handle = _thinking_debounce_handles.pop(key, None)
+    if old_handle is not None:
+        old_handle.cancel()
+    if key in _thinking_buffer:
+        _flush_thinking(key, task_id=None)
+    _thinking_buffer.pop(key, None)
+    _thinking_had_tools.pop(key, None)
 
 
 def broadcast_teams_refresh() -> None:

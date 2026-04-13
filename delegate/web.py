@@ -1345,8 +1345,8 @@ async def _lifespan(app: FastAPI):
         except RuntimeError:
             logger.error("Another daemon is already running — refusing to start")
             raise
-        interval = float(os.environ.get("DELEGATE_INTERVAL", "1.0"))
-        max_concurrent = int(os.environ.get("DELEGATE_MAX_CONCURRENT", "256"))
+        interval = float(os.environ.get("DELEGATE_INTERVAL", "3.0"))
+        max_concurrent = int(os.environ.get("DELEGATE_MAX_CONCURRENT", "6"))
         budget_str = os.environ.get("DELEGATE_TOKEN_BUDGET")
         token_budget = int(budget_str) if budget_str else None
 
