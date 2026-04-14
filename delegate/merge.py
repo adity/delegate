@@ -421,6 +421,70 @@ def _run_pre_merge(
     setup_script = wt_path / ".delegate" / "setup.sh"
     test_script = wt_path / ".delegate" / "premerge.sh"
 
+    # --- Built-in sanity checks (always run, no script required) ---
+    # These catch the two most common merge-failure causes before we
+    # even try running the test suite.
+
+    # 1. Conflict markers left in tracked files
+    try:
+        marker_check = subprocess.run(
+            ["git", "diff", "--cached", "--diff-filter=ACMR", "-S", "<<<<<<<", "--name-only"],
+            cwd=wt_dir, capture_output=True, text=True, timeout=30,
+        )
+        # Also grep the working tree for markers in common file types
+        grep_check = subprocess.run(
+            ["grep", "-rl", "<<<<<<<", "--include=*.py", "--include=*.md",
+             "--include=*.yaml", "--include=*.yml", "--include=*.json",
+             "--include=*.txt", "--include=*.toml", "--include=*.cfg", "."],
+            cwd=wt_dir, capture_output=True, text=True, timeout=30,
+        )
+        if grep_check.returncode == 0 and grep_check.stdout.strip():
+            bad_files = grep_check.stdout.strip()
+            return False, f"Conflict markers found in:\n{bad_files}"
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # don't block merge on check failure
+
+    # 2. Missing trailing newlines in text files (causes patch/rebase failures)
+    try:
+        diff_files = subprocess.run(
+            ["git", "diff", "HEAD~1", "--name-only", "--diff-filter=ACMR"],
+            cwd=wt_dir, capture_output=True, text=True, timeout=30,
+        )
+        if diff_files.returncode == 0:
+            missing_newline = []
+            for fname in diff_files.stdout.strip().splitlines():
+                fpath = wt_path / fname
+                if not fpath.is_file() or fpath.stat().st_size == 0:
+                    continue
+                # Only check text-like extensions
+                if fpath.suffix not in ('.py', '.md', '.yaml', '.yml', '.json',
+                                        '.txt', '.toml', '.cfg', '.sh', '.html',
+                                        '.css', '.js', '.ts', '.tsx', '.jsx'):
+                    continue
+                try:
+                    with open(fpath, 'rb') as f:
+                        f.seek(-1, 2)
+                        if f.read(1) != b'\n':
+                            missing_newline.append(fname)
+                except OSError:
+                    continue
+            if missing_newline:
+                # Auto-fix: append trailing newlines rather than failing
+                for fname in missing_newline:
+                    fpath = wt_path / fname
+                    try:
+                        with open(fpath, 'ab') as f:
+                            f.write(b'\n')
+                    except OSError:
+                        pass
+                logger.info(
+                    "Auto-fixed missing trailing newlines in %d files: %s",
+                    len(missing_newline), ", ".join(missing_newline),
+                )
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # don't block merge on check failure
+
+    # --- External validation scripts ---
     # Build a single shell command that:
     # 1. Sources setup.sh if it exists (warns + continues if missing).
     # 2. Sources premerge.sh if it exists (warns + skips if missing).

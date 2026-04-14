@@ -1298,6 +1298,15 @@ def build_agent_tools(hc_home: Path, team: str, agent: str) -> list:
                 exp = await asyncio.to_thread(read_summary, ad, handle)
                 result["succeeded"] = exp["succeeded"]
                 result["summary"] = exp["summary"] or "(no summary file written by experiment)"
+            else:
+                # Polling guidance for still-running processes — prevents
+                # agents from burning their entire context on 100+ status
+                # checks that return the same "still running" result.
+                result["_guidance"] = (
+                    "Process still running. Do NOT poll again for at least 60 seconds. "
+                    "Do productive work between checks (update notes, plan next steps, "
+                    "review code). The system will auto-notify you when the process completes."
+                )
 
             if args.get("include_logs"):
                 n = args.get("tail_lines") or DEFAULT_TAIL_LINES

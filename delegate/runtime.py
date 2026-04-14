@@ -1135,10 +1135,26 @@ async def run_turn(
     # mailbox_send is the only action that truly moves the ball forward —
     # task_status, task_comment, task_assign etc. are invisible unless
     # someone is notified.  If no message was sent, nudge the agent.
+    #
+    # Suppression: if any incoming message explicitly tells the agent to
+    # stay silent ("do not reply", "wait until", "no reply needed", etc.)
+    # the nudge is skipped — forcing a reply here creates churn loops that
+    # waste context and contradict the sender's intent.
     sent_message = "mailbox_send" in turn_tools
     nudge_msg = None
 
-    if not sent_message:
+    _SUPPRESS_PATTERNS = (
+        "do not reply", "don't reply", "do not respond", "don't respond",
+        "no reply needed", "no response needed", "wait until",
+        "do NOT reply", "silence until", "reply only when",
+        "do not send", "do not message",
+    )
+    suppress_nudge = any(
+        any(pat in m.body.lower() for pat in _SUPPRESS_PATTERNS)
+        for m in batch
+    )
+
+    if not sent_message and not suppress_nudge:
         msg_summary = "\n".join(
             f"  [{m.sender} -> {m.recipient}]: {m.body[:200]}{'...' if len(m.body) > 200 else ''}"
             for m in batch
@@ -1158,6 +1174,8 @@ async def run_turn(
             len(turn_tools),
             ", ".join(turn_tools[:10]) if turn_tools else "(none)",
         )
+    elif not sent_message and suppress_nudge:
+        alog.info("No mailbox_send but nudge suppressed — incoming message requests silence.")
 
     if nudge_msg:
         try:

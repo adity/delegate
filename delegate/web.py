@@ -890,6 +890,19 @@ def _dispatch_review_request(
     if key in recently_dispatched:
         return
 
+    # Re-check task status right before sending — the task may have been
+    # merged or cancelled between collection and dispatch (race condition
+    # that caused stale review requests in production).
+    from delegate.task import get_task as _get_task_fresh
+    fresh = _get_task_fresh(hc_home, team, task_id)
+    if not fresh or fresh.get("status") != "in_approval":
+        logger.debug(
+            "Skipping stale review dispatch for %s (status now: %s)",
+            format_task_id(task_id), fresh.get("status") if fresh else "deleted",
+        )
+        recently_dispatched.add(key)  # don't retry stale tasks
+        return
+
     title = task.get("title", f"T{task_id:04d}")
     send_message(
         hc_home, team, "system", reviewer_name,
@@ -1185,6 +1198,20 @@ async def _daemon_loop(
                                     continue
                             if key in recently_nudged:
                                 continue
+                            # Skip agents with active background processes —
+                            # they're legitimately waiting on GPU jobs / experiments.
+                            from delegate.background import list_active as _bg_list_active
+                            from delegate.paths import agent_dir as _stall_agent_dir
+                            try:
+                                _ad = _stall_agent_dir(hc_home, team, assignee)
+                                if _bg_list_active(_ad):
+                                    logger.debug(
+                                        "Stall detector: %s has running bg jobs, skipping nudge for T%04d",
+                                        assignee, tid,
+                                    )
+                                    continue
+                            except Exception:
+                                pass  # don't let bg check errors block nudging
                             title = t.get("title", f"T{tid:04d}")
                             status = t.get("status", "unknown")
                             nudge_body = (
