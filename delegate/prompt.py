@@ -216,17 +216,32 @@ REFERENCE FILES (read as needed):
 
 Team data: {hc_home}/teams/{team}/"""
 
+    # Roles that write code and need environment setup instructions.
+    _CODE_ROLES = frozenset({
+        "engineer", "worker", "researcher", "researcher_assistant",
+        "frontend", "backend", "fullstack", "devops", "qa", "architect",
+    })
+
     def _charter_block(self) -> str:
-        """Raw charter text — joined with ``---`` separators."""
+        """Raw charter text — joined with ``---`` separators.
+
+        Loads conditionally: ``environment.md`` is skipped for non-coding
+        roles (manager, reviewer, designer) to save ~600 tokens per turn.
+        ``code-review.md`` is skipped for roles that don't review code.
+        """
         charter_dir = base_charter_dir()
         charter_files = [
             "values.md",
             "communication.md",
             "task-management.md",
-            "code-review.md",
-            "continuous-improvement.md",
-            "environment.md",
         ]
+        # code-review only for reviewer and manager (who dispatches reviews)
+        if self._role in ("reviewer", "manager"):
+            charter_files.append("code-review.md")
+        charter_files.append("continuous-improvement.md")
+        # environment setup only for roles that write code
+        if self._role in self._CODE_ROLES:
+            charter_files.append("environment.md")
         sections = []
         for fname in charter_files:
             fpath = charter_dir / fname
@@ -445,9 +460,7 @@ Team data: {hc_home}/teams/{team}/"""
             for rn, wp in workspace_paths.items():
                 parts.append(f"  {rn}: {wp}")
             parts.append(
-                "\n- Commit your changes frequently with clear messages."
-                f"\n- Do NOT switch branches — stay on {current_task.get('branch', '')}."
-                "\n- Your branch is local-only and will be merged by the merge worker when approved."
+                f"\nStay on `{current_task.get('branch', '')}`. Commit often. Branch is local-only (merged by merge worker)."
             )
             # Only include verbose setup instructions if setup.sh doesn't exist yet.
             first_worktree = next(iter(workspace_paths.values()))
@@ -469,7 +482,7 @@ Team data: {hc_home}/teams/{team}/"""
         # Task activity
         try:
             from delegate.chat import get_task_timeline
-            activity = get_task_timeline(self.hc_home, self.team, current_task["id"], limit=20)
+            activity = get_task_timeline(self.hc_home, self.team, current_task["id"], limit=10)
             if activity:
                 parts.append(f"\n--- Task Activity (latest {len(activity)} items) ---")
                 for item in activity:
@@ -529,13 +542,7 @@ Team data: {hc_home}/teams/{team}/"""
             for i, msg in enumerate(messages, 1):
                 parts.append(f"--- Message {i}/{n} ---")
                 parts.append(f"[{msg.time}] {msg.sender} → {msg.recipient}:\n{msg.body}")
-            parts.append(
-                f"\n\U0001f449 You have {n} message(s) above. "
-                "You MUST address ALL of them in this turn — do not skip any. "
-                "Handle each message: respond, take action, or acknowledge. "
-                "If messages are related, you may address them together in a "
-                "single coherent response."
-            )
+            parts.append(f"\nAddress all {n} message(s) above this turn.")
         else:
             parts.append("No new messages.")
 

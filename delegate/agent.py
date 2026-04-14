@@ -335,15 +335,23 @@ def build_system_prompt(
     manager_name = get_member_by_role(hc_home, team, "manager") or "delegate"
 
     # --- 1. Universal charter (shared across ALL agents) ---
+    # Conditional loading: environment.md skipped for non-coding roles,
+    # code-review.md only for reviewer/manager.
+    _CODE_ROLES = frozenset({
+        "engineer", "worker", "researcher", "researcher_assistant",
+        "frontend", "backend", "fullstack", "devops", "qa", "architect",
+    })
     charter_dir = base_charter_dir()
     universal_charter_files = [
         "values.md",
         "communication.md",
         "task-management.md",
-        "code-review.md",
-        "continuous-improvement.md",
-        "environment.md",
     ]
+    if role in ("reviewer", "manager"):
+        universal_charter_files.append("code-review.md")
+    universal_charter_files.append("continuous-improvement.md")
+    if role in _CODE_ROLES:
+        universal_charter_files.append("environment.md")
     charter_sections = []
     for fname in universal_charter_files:
         fpath = charter_dir / fname
@@ -637,9 +645,7 @@ def build_user_message(
             for rn, wp in workspace_paths.items():
                 parts.append(f"  {rn}: {wp}")
             parts.append(
-                "\n- Commit your changes frequently with clear messages."
-                f"\n- Do NOT switch branches — stay on {current_task.get('branch', '')}."
-                "\n- Your branch is local-only and will be merged by the merge worker when approved."
+                f"\nStay on `{current_task.get('branch', '')}`. Commit often. Branch is local-only (merged by merge worker)."
             )
             # Only include verbose setup instructions if setup.sh doesn't exist yet.
             # Once created, the agent knows the pattern — no need to repeat every turn.
@@ -662,7 +668,7 @@ def build_user_message(
         # Task activity — status/assignee transitions, comments, events
         try:
             from delegate.chat import get_task_timeline
-            activity = get_task_timeline(hc_home, team, current_task["id"], limit=20)
+            activity = get_task_timeline(hc_home, team, current_task["id"], limit=10)
             if activity:
                 parts.append(f"\n--- Task Activity (latest {len(activity)} items) ---")
                 for item in activity:
@@ -714,13 +720,7 @@ def build_user_message(
         for i, msg in enumerate(messages, 1):
             parts.append(f"--- Message {i}/{n} ---")
             parts.append(f"[{msg.time}] {msg.sender} → {msg.recipient}:\n{msg.body}")
-        parts.append(
-            f"\n\U0001f449 You have {n} message(s) above. "
-            "You MUST address ALL of them in this turn — do not skip any. "
-            "Handle each message: respond, take action, or acknowledge. "
-            "If messages are related, you may address them together in a "
-            "single coherent response."
-        )
+        parts.append(f"\nAddress all {n} message(s) above this turn.")
     else:
         parts.append("No new messages.")
 
