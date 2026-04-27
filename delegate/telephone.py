@@ -63,6 +63,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shlex
 import signal
 import time
 import uuid
@@ -902,6 +904,45 @@ class Telephone:
                     if pattern.upper() in cmd_upper:
                         return _deny(f"Command denied: contains '{pattern}'")
 
+            # --- Bash write-destination check ---
+            # Heuristic parse: detect cp/mv/redirect/tee/etc. that would
+            # write outside allowed_write_paths.  Bash bypasses the
+            # file_path check above (no structured arg), so this is the
+            # only application-layer check on bash writes — defense in
+            # depth alongside the OS sandbox.
+            if (
+                tool_name == "Bash"
+                and _write_paths is not None
+            ):
+                cmd = tool_input.get("command", "")
+                if cmd:
+                    write_targets = extract_bash_write_targets(cmd, telephone.cwd)
+                    if write_targets is None:
+                        # Parse failure: fail closed only if the command
+                        # smells like a write.  Otherwise let it through —
+                        # benign commands with quoting quirks shouldn't
+                        # be denied.
+                        if _BASH_WRITE_HINT_RE.search(cmd):
+                            return _deny(
+                                "Bash command could not be parsed for "
+                                "write-destination check; rephrase or "
+                                "split the command."
+                            )
+                    else:
+                        for tgt in write_targets:
+                            if not any(
+                                tgt == wp or _is_under(tgt, wp)
+                                for wp in _write_paths
+                            ):
+                                return _deny(
+                                    f"Bash write denied: '{tgt}' is "
+                                    f"outside allowed paths "
+                                    f"{[str(p) for p in _write_paths]}. "
+                                    f"Use a path under your worktree, "
+                                    f"or `git worktree add /tmp/<name> "
+                                    f"<branch>` for cross-branch checks."
+                                )
+
             return _allow()
 
         return _guard
@@ -935,3 +976,192 @@ def _is_under(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# Bash redirection operator: >, >>, 1>, 2>, &>, &>>, etc.
+_REDIRECT_RE = re.compile(r"^(?:[12]|&)?>>?$")
+_REDIRECT_ATTACHED_RE = re.compile(r"^((?:[12]|&)?>>?)(.+)$")
+_VAR_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SEGMENT_OPS = {";", "&&", "||", "|", "&"}
+
+# Pseudo-files that bash legitimately redirects to — not real writes.
+_PSEUDO_WRITE_TARGETS = frozenset({
+    "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty",
+})
+
+# Hint that a command probably writes to disk — used by the guard to
+# decide whether to fail closed on parse failure.
+_BASH_WRITE_HINT_RE = re.compile(
+    r"(^|[\s;&|])(?:cp|mv|tee|dd|touch|truncate|install|ln|rsync)(\s|$)"
+    r"|>>?|--in-place|\bsed\s+-i"
+)
+
+
+def _resolve_target(raw: str, base: Path) -> Path:
+    """Resolve a write-target path string against *base*, without strict
+    existence checks (the file may not exist yet)."""
+    p = Path(raw)
+    if not p.is_absolute():
+        p = base / p
+    try:
+        return p.resolve()
+    except (OSError, RuntimeError):
+        return p
+
+
+def _split_attached_redirects(tokens: list[str]) -> list[str]:
+    """Expand ``>file`` / ``>>file`` (no space) into separate tokens."""
+    out: list[str] = []
+    for tok in tokens:
+        m = _REDIRECT_ATTACHED_RE.match(tok)
+        if m and m.group(2):
+            out.append(m.group(1))
+            out.append(m.group(2))
+        else:
+            out.append(tok)
+    return out
+
+
+def _split_segments(tokens: list[str]) -> list[list[str]]:
+    """Split a token stream into command segments at ``;``, ``&&``, ``||``,
+    ``|``, ``&``.  Also strips trailing ``;`` from tokens like ``cmd;``."""
+    segments: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok in _SEGMENT_OPS:
+            segments.append([])
+        elif tok.endswith(";") and tok != ";":
+            segments[-1].append(tok[:-1])
+            segments.append([])
+        else:
+            segments[-1].append(tok)
+    return [s for s in segments if s]
+
+
+def extract_bash_write_targets(command: str, cwd: Path) -> list[Path] | None:
+    """Best-effort parse of *command* for filesystem write destinations.
+
+    Returns absolute paths the command would write to, or ``None`` if
+    the command could not be parsed (caller should fail closed on
+    ``None``).  Pseudo-files like ``/dev/null`` are filtered out.
+
+    Heuristic — covers the high-frequency leak vectors:
+
+    * Stdout redirection: ``>``, ``>>``, ``1>``, ``2>``, ``&>``, ``&>>``
+      (with or without space before the path).
+    * ``cp`` / ``mv`` / ``install`` / ``ln``: last positional = destination.
+      Also ``cp -t TARGET`` / ``--target-directory TARGET``.
+    * ``tee [FILE...]`` (all positional args).
+    * ``dd of=FILE``.
+    * ``sed -i FILE`` / ``sed --in-place FILE`` (last positional).
+    * ``touch FILE...`` / ``truncate -s SIZE FILE...``.
+
+    Best-effort cd tracking inside a segment: ``cd PATH && cmd`` shifts
+    the resolution base for subsequent tokens in the same segment.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+
+    tokens = _split_attached_redirects(tokens)
+    targets: list[Path] = []
+
+    # cwd persists across segments — `cd /tmp && cp x y` resolves y in /tmp
+    # exactly like bash itself does.
+    seg_cwd = cwd
+    for seg in _split_segments(tokens):
+        i = 0
+
+        # Skip leading var assignments / env wrapper to find the verb.
+        while i < len(seg):
+            tok = seg[i]
+            if tok == "env":
+                i += 1
+                while i < len(seg) and _VAR_ASSIGN_RE.match(seg[i]):
+                    i += 1
+                continue
+            if _VAR_ASSIGN_RE.match(tok):
+                i += 1
+                continue
+            if tok == "cd" and i + 1 < len(seg):
+                cd_to = seg[i + 1]
+                seg_cwd = (
+                    Path(cd_to) if Path(cd_to).is_absolute()
+                    else (seg_cwd / cd_to)
+                )
+                try:
+                    seg_cwd = seg_cwd.resolve()
+                except (OSError, RuntimeError):
+                    pass
+                # `cd X && rest` — already split by &&. `cd X; rest` likewise.
+                # Within a single segment, only the cd remains; advance past it.
+                i += 2
+                continue
+            break
+
+        if i >= len(seg):
+            continue
+
+        verb = seg[i]
+        rest = seg[i + 1:]
+
+        # First, scan rest for redirections — these apply regardless of verb.
+        j = 0
+        positional: list[str] = []
+        flags_with_value: dict[str, str] = {}
+        while j < len(rest):
+            a = rest[j]
+            if _REDIRECT_RE.match(a) and j + 1 < len(rest):
+                targets.append(_resolve_target(rest[j + 1], seg_cwd))
+                j += 2
+                continue
+            if a == "--":
+                positional.extend(rest[j + 1:])
+                break
+            if a.startswith("-"):
+                # Take next token as flag value for known "consume-next" flags.
+                if a in ("-t", "--target-directory") and j + 1 < len(rest):
+                    flags_with_value[a] = rest[j + 1]
+                    j += 2
+                    continue
+                j += 1
+                continue
+            positional.append(a)
+            j += 1
+
+        if verb in ("cp", "mv", "install", "ln"):
+            if "-t" in flags_with_value or "--target-directory" in flags_with_value:
+                tgt = flags_with_value.get("-t") or flags_with_value["--target-directory"]
+                targets.append(_resolve_target(tgt, seg_cwd))
+            elif positional:
+                targets.append(_resolve_target(positional[-1], seg_cwd))
+
+        elif verb == "tee":
+            for a in positional:
+                targets.append(_resolve_target(a, seg_cwd))
+
+        elif verb == "dd":
+            for a in positional:
+                if a.startswith("of="):
+                    targets.append(_resolve_target(a[3:], seg_cwd))
+
+        elif verb == "sed":
+            # In-place edit: last positional is the file (the rest is script).
+            in_place = any(
+                a == "-i" or a.startswith("-i") or a.startswith("--in-place")
+                for a in rest
+                if a.startswith("-")
+            )
+            if in_place and positional:
+                targets.append(_resolve_target(positional[-1], seg_cwd))
+
+        elif verb == "touch":
+            for a in positional:
+                targets.append(_resolve_target(a, seg_cwd))
+
+        elif verb == "truncate":
+            for a in positional:
+                targets.append(_resolve_target(a, seg_cwd))
+
+    # Filter out pseudo-files.
+    return [t for t in targets if str(t) not in _PSEUDO_WRITE_TARGETS]

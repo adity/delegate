@@ -412,6 +412,213 @@ class TestTelephoneUnit:
         ok = asyncio.run(guard("Write", {"file_path": str(safe / "ok.txt")}, None))
         assert ok.behavior == "allow"
 
+    # ---- Bash write-destination guard -----------------------------------
+
+    def test_bash_guard_denies_cp_into_outside_path(self, tmp_path):
+        """cp into a path outside allowed_write_paths is denied.
+
+        Reproduces the leak from RANA-0812 (engineer agent ran
+        `cp /tmp/x /home/.../rana_trading/tests/.../file.py`).
+        """
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree), "/tmp"],
+        )
+        guard = t._make_guard()
+
+        # /etc is outside both allowed_write_paths — direct analog of the
+        # leak (a registered repo's working tree, not the agent's worktree).
+        leak_cmd = "cp /tmp/foo.py /etc/leaked.py && echo copied"
+        deny = asyncio.run(guard("Bash", {"command": leak_cmd}, None))
+        assert deny.behavior == "deny"
+        assert "outside allowed paths" in deny.message
+        assert "/etc/leaked.py" in deny.message
+
+    def test_bash_guard_allows_cp_inside_worktree(self, tmp_path):
+        """cp into worktree is allowed."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree), "/tmp"],
+        )
+        guard = t._make_guard()
+
+        ok = asyncio.run(guard(
+            "Bash", {"command": f"cp /tmp/foo.py {worktree}/local.py"}, None,
+        ))
+        assert ok.behavior == "allow"
+
+    def test_bash_guard_denies_redirect_outside(self, tmp_path):
+        """Stdout redirection to a path outside allowed paths is denied."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        deny = asyncio.run(guard(
+            "Bash", {"command": f"echo hi > {outside}/x.txt"}, None,
+        ))
+        assert deny.behavior == "deny"
+
+    def test_bash_guard_allows_dev_null(self, tmp_path):
+        """Redirecting to /dev/null is always allowed."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        ok = asyncio.run(guard(
+            "Bash", {"command": "noisy_cmd 2> /dev/null"}, None,
+        ))
+        assert ok.behavior == "allow"
+
+    def test_bash_guard_tracks_cd_across_segments(self, tmp_path):
+        """`cd /tmp && cp x rel` resolves rel in /tmp like real bash."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],  # /tmp is NOT in here
+        )
+        guard = t._make_guard()
+
+        # cd /tmp && cp /etc/something out.py -> writes to /tmp/out.py,
+        # which is outside allowed_write_paths.
+        deny = asyncio.run(guard(
+            "Bash", {"command": "cd /tmp && cp /etc/hosts out.py"}, None,
+        ))
+        assert deny.behavior == "deny"
+
+    def test_bash_guard_allows_read_only_commands(self, tmp_path):
+        """Pure read commands (cat, ls, git show) are not flagged."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        for cmd in [
+            "cat /etc/hosts",
+            "ls /home",
+            "git show HEAD:foo",
+            f"cd {worktree} && pytest -v",
+            "grep -r foo /etc",
+        ]:
+            r = asyncio.run(guard("Bash", {"command": cmd}, None))
+            assert r.behavior == "allow", f"unexpectedly denied: {cmd}"
+
+    def test_bash_guard_denies_tee_outside(self, tmp_path):
+        """`tee FILE` to outside path is denied."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        deny = asyncio.run(guard(
+            "Bash", {"command": "echo x | tee /etc/leak.txt"}, None,
+        ))
+        assert deny.behavior == "deny"
+
+    def test_bash_guard_denies_sed_in_place_outside(self, tmp_path):
+        """`sed -i FILE` outside allowed paths is denied."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        deny = asyncio.run(guard(
+            "Bash", {"command": "sed -i 's/a/b/' /etc/hosts"}, None,
+        ))
+        assert deny.behavior == "deny"
+
+    def test_bash_guard_parse_failure_fails_open_for_benign(self, tmp_path):
+        """Unparseable commands without write hints are allowed.
+
+        We only fail closed when the command smells like a write — a
+        quoting quirk in `grep` shouldn't get denied.
+        """
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        # Unterminated quote, no write operators → allowed
+        ok = asyncio.run(guard("Bash", {"command": "grep 'unterminated"}, None))
+        assert ok.behavior == "allow"
+
+    def test_bash_guard_parse_failure_fails_closed_for_writes(self, tmp_path):
+        """Unparseable commands that contain write hints are denied."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        t = Telephone(
+            preamble="hello",
+            cwd=worktree,
+            allowed_write_paths=[str(worktree)],
+        )
+        guard = t._make_guard()
+
+        # Unterminated quote AND a redirect — fail closed.
+        deny = asyncio.run(guard(
+            "Bash", {"command": "echo 'unterminated > /etc/x"}, None,
+        ))
+        assert deny.behavior == "deny"
+
+    def test_bash_guard_unrestricted_when_no_write_paths(self, tmp_path):
+        """When allowed_write_paths is unset, bash writes aren't checked."""
+        t = Telephone(
+            preamble="hello",
+            cwd=tmp_path,
+            denied_bash_patterns=["rm -rf /"],  # need *some* restriction
+        )
+        guard = t._make_guard()
+        assert guard is not None
+
+        ok = asyncio.run(guard(
+            "Bash", {"command": "cp /tmp/x /etc/y"}, None,
+        ))
+        assert ok.behavior == "allow"
+
     def test_id_is_uuid_hex(self, tmp_path):
         """Telephone id is a 32-char hex UUID."""
         t = Telephone(preamble="hello", cwd=tmp_path)
