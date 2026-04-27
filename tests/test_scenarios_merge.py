@@ -284,9 +284,11 @@ class TestMergeScenarios:
         _make_feature_branch(repo, branch, filename="feature.py", content="# feature\n")
         _register_repo_with_symlink(hc_home, "myrepo", repo)
 
-        # User is on main (default after setup) with uncommitted changes
-        dirty_content = "uncommitted work\n"
-        (repo / "dirty_file.txt").write_text(dirty_content)
+        # User is on main (default after setup) with tracked uncommitted
+        # changes — these must block the merge so user work is preserved.
+        # (Untracked-only dirt is auto-stashed as a leak; tested separately.)
+        dirty_content = "# Test repo\nuncommitted edit\n"
+        (repo / "README.md").write_text(dirty_content)
 
         # Create task and attempt merge
         task = _make_in_approval_task(hc_home, repo="myrepo", branch=branch, merging=True)
@@ -300,8 +302,7 @@ class TestMergeScenarios:
         assert result.reason.retryable is True, "DIRTY_MAIN should be retryable"
 
         # Verify user's uncommitted changes are preserved
-        assert (repo / "dirty_file.txt").exists(), "Dirty file should be preserved"
-        assert (repo / "dirty_file.txt").read_text() == dirty_content, "Dirty file content should be unchanged"
+        assert (repo / "README.md").read_text() == dirty_content, "Tracked dirty file content should be unchanged"
 
     def test_5_concurrent_agents_separate_worktrees(self, hc_home, tmp_path):
         """Test 5: Concurrent agents (separate worktrees).

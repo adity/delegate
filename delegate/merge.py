@@ -585,6 +585,66 @@ _run_pipeline = _run_pre_merge
 # Fast-forward merge (operates on refs only — no checkout needed)
 # ---------------------------------------------------------------------------
 
+def _stash_untracked_leak(repo_dir: str) -> tuple[bool, str]:
+    """Stash untracked-only leak files in *repo_dir*; fail on tracked dirt.
+
+    Pre-merge cleanliness check that distinguishes two kinds of dirty
+    state on the user's main repo:
+
+    * **Tracked changes** (modified / staged / deleted files) — likely
+      user work in progress.  Returns ``(False, message)`` so the
+      ff-merge aborts and the user's work is preserved.
+
+    * **Untracked-only** — almost always a leak: an agent or a
+      pre-merge script wrote into the main worktree where it has no
+      business writing.  We stash with ``--include-untracked`` so the
+      content isn't lost, log a WARNING with each path so the leak is
+      observable, and return ``(True, summary)`` to let the merge
+      proceed.
+
+    Clean tree returns ``(True, "")``.
+    """
+    status_result = _run_git(["status", "--porcelain"], cwd=repo_dir)
+    dirty = status_result.stdout.strip()
+    if not dirty:
+        return True, ""
+
+    lines = dirty.splitlines()
+    untracked_paths: list[str] = []
+    tracked_lines: list[str] = []
+    for line in lines:
+        # Porcelain v1: 2-char status code, space, path. Untracked = "??".
+        if line.startswith("??"):
+            untracked_paths.append(line[3:])
+        else:
+            tracked_lines.append(line)
+
+    if tracked_lines:
+        db = get_default_branch(repo_dir)
+        return False, (
+            f"Main repo has uncommitted tracked changes on {db} — "
+            "commit or stash them before merging.\n"
+            f"Dirty files:\n" + "\n".join(tracked_lines)[:500]
+        )
+
+    logger.warning(
+        "Main repo %s has %d untracked file(s) — auto-stashing leak before "
+        "ff-merge: %s",
+        repo_dir, len(untracked_paths), untracked_paths,
+    )
+    stash = _run_git(
+        ["stash", "push", "--include-untracked", "-m",
+         f"delegate-auto-heal: pre-ff stash of {len(untracked_paths)} untracked leak file(s)"],
+        cwd=repo_dir,
+    )
+    if stash.returncode != 0:
+        return False, (
+            f"Could not stash untracked leak files: {stash.stderr.strip()}\n"
+            f"Files: {untracked_paths}"
+        )
+    return True, f"Stashed {len(untracked_paths)} untracked file(s) before ff-merge"
+
+
 def _ff_merge_impl(repo_dir: str, tip: str, *, resolve_tip: bool) -> tuple[bool, str]:
     """Core fast-forward merge logic.
 
@@ -627,15 +687,14 @@ def _ff_merge_impl(repo_dir: str, tip: str, *, resolve_tip: bool) -> tuple[bool,
     user_branch = head_result.stdout.strip() if head_result.returncode == 0 else ""
 
     if user_branch == db:
-        # User is on the default branch — check for uncommitted changes
-        status_result = _run_git(["status", "--porcelain"], cwd=repo_dir)
-        dirty = status_result.stdout.strip()
-        if dirty:
-            return False, (
-                f"Main repo has uncommitted changes on {db} — "
-                "commit or stash them before merging.\n"
-                f"Dirty files:\n{dirty[:500]}"
-            )
+        # User is on the default branch — check for uncommitted changes.
+        # Untracked-only dirt is auto-stashed (almost always a leak from a
+        # crashed agent / pre-merge step writing into the main worktree —
+        # see _stash_untracked_leak); tracked changes still fail to
+        # protect uncommitted user work.
+        ok, stash_msg = _stash_untracked_leak(repo_dir)
+        if not ok:
+            return False, stash_msg
 
         # Clean checkout: use merge --ff-only to update ref + working tree
         result = _run_git(["merge", "--ff-only", tip_sha], cwd=repo_dir)

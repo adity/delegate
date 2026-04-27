@@ -279,15 +279,16 @@ class TestMergeTask:
         assert (repo / "dirty_file.txt").exists(), "Merge worker disturbed main repo working directory"
         assert (repo / "dirty_file.txt").read_text() == "user's uncommitted work\n"
 
-    def test_dirty_main_checkout_blocks_merge(self, hc_home, tmp_path):
-        """When user has main checked out with uncommitted changes, merge fails."""
+    def test_dirty_main_tracked_changes_block_merge(self, hc_home, tmp_path):
+        """Tracked uncommitted changes on main block the merge (preserves user work)."""
         repo = _setup_git_repo(tmp_path)
         branch = "alice/T0001"
         _make_feature_branch(repo, branch)
         _register_repo_with_symlink(hc_home, "myrepo", repo)
 
-        # User is on main (default after setup) — add dirty file
-        (repo / "dirty_file.txt").write_text("user's uncommitted work\n")
+        # Modify a tracked file (README.md from _setup_git_repo) — this is
+        # real user work, so the merge must NOT proceed.
+        (repo / "README.md").write_text("# Test repo\nuser's uncommitted edit\n")
 
         task = _make_in_approval_task(hc_home, repo="myrepo", branch=branch, merging=True)
 
@@ -295,11 +296,36 @@ class TestMergeTask:
 
         assert result.success is False
         assert result.reason == MergeFailureReason.DIRTY_MAIN
-        assert "uncommitted" in result.message.lower()
+        assert "tracked" in result.message.lower()
 
-        # Dirty file should be preserved
-        assert (repo / "dirty_file.txt").exists()
-        assert (repo / "dirty_file.txt").read_text() == "user's uncommitted work\n"
+        # User's edit must be preserved in the working tree (no stash).
+        assert (repo / "README.md").read_text() == "# Test repo\nuser's uncommitted edit\n"
+
+    def test_dirty_main_untracked_leak_is_stashed(self, hc_home, tmp_path):
+        """Untracked-only leak files are auto-stashed — merge proceeds."""
+        repo = _setup_git_repo(tmp_path)
+        branch = "alice/T0001"
+        _make_feature_branch(repo, branch, filename="new_feature.py", content="# feature\n")
+        _register_repo_with_symlink(hc_home, "myrepo", repo)
+
+        # Simulate a leak: an untracked file appears in main's working tree.
+        (repo / "leaked_file.txt").write_text("leaked from a sandboxed agent\n")
+
+        task = _make_in_approval_task(hc_home, repo="myrepo", branch=branch, merging=True)
+        result = merge_task(hc_home, SAMPLE_TEAM, task["id"], skip_tests=True)
+
+        assert result.success is True, f"Merge should auto-recover from leak: {result.message}"
+
+        # The merge landed
+        assert (repo / "new_feature.py").exists()
+
+        # The leaked file is gone from the working tree, but recoverable from stash.
+        assert not (repo / "leaked_file.txt").exists()
+        stash_list = subprocess.run(
+            ["git", "stash", "list"], cwd=str(repo),
+            capture_output=True, text=True, check=True,
+        ).stdout
+        assert "delegate-auto-heal" in stash_list
 
     def test_clean_main_checkout_updates_working_tree(self, hc_home, tmp_path):
         """When user has main checked out cleanly, merge --ff-only updates the working tree."""
