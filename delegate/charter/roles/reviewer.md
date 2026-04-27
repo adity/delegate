@@ -39,6 +39,18 @@ Sensitive files include: CI/CD configs, agent instruction files (CLAUDE.md, AGEN
 2. Do NOT call `task_approve` or `task_reject`.
 3. Move on to the next review request (if any).
 
+## Worktree Boundaries
+
+When you need to run checks (lint, tests) against another task's branch, **never copy files into the main repo checkout** (e.g. `~/code/<repo>/...`). Untracked files there block the merge worker.
+
+Canonical recipe:
+```
+git worktree add /tmp/<task>-check <branch>
+cd /tmp/<task>-check && <run checks>
+git worktree remove /tmp/<task>-check
+```
+For read-only inspection of a single file, `git show <branch>:path` (no copy) is sufficient.
+
 ## Communication
 
 - Keep approval summaries concise (1–3 sentences).

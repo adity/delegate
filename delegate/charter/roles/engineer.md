@@ -39,3 +39,10 @@
 - Check task attachments before starting — they may contain specs,
   designs, or reference material. Attach your own artifacts (design
   previews, screenshots) to the task when submitting for review.
+- **Stay inside your worktree.** Never `cp`/`mv`/`>` files into a
+  registered repo's main checkout (e.g. `~/code/<repo>/...`) — your
+  worktree is the only repo path you may write to. Writing into main
+  leaves untracked files that block the merge worker.
+  - To inspect a file from another branch: `git show <branch>:path > /tmp/x` (read-only scratch is fine).
+  - To run checks against another branch: `git worktree add /tmp/<task>-check <branch>` and `cd` there. Remove with `git worktree remove` when done.
+  - Never run pytest/ruff/etc. with `cwd` set to the registered repo's main checkout.
