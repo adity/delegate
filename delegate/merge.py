@@ -484,6 +484,31 @@ def _run_pre_merge(
     except (subprocess.TimeoutExpired, OSError):
         pass  # don't block merge on check failure
 
+    # --- Skip premerge for doc-only branches ---
+    # If the branch only changes non-code files (markdown, YAML, JSON, txt),
+    # there's nothing to test. Skip the expensive test suite entirely.
+    _CODE_EXTENSIONS = {'.py', '.pyx', '.c', '.cpp', '.h', '.rs', '.go', '.js',
+                        '.ts', '.tsx', '.jsx', '.sh', '.bash', '.zsh'}
+    try:
+        diff_vs_main = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1"],
+            cwd=wt_dir, capture_output=True, text=True, timeout=30,
+        )
+        if diff_vs_main.returncode == 0:
+            changed_files = diff_vs_main.stdout.strip().splitlines()
+            has_code = any(
+                Path(f).suffix in _CODE_EXTENSIONS for f in changed_files
+            )
+            if changed_files and not has_code:
+                skip_msg = (
+                    f"Doc-only branch ({len(changed_files)} files, no code changes) "
+                    f"— skipping premerge.sh"
+                )
+                logger.info(skip_msg)
+                return True, skip_msg
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # on failure, fall through to normal premerge
+
     # --- External validation scripts ---
     # Build a single shell command that:
     # 1. Sources setup.sh if it exists (warns + continues if missing).
@@ -496,6 +521,24 @@ def _run_pre_merge(
     setup_exists = setup_script.exists()
     test_exists = test_script.exists()
 
+    # Prefer premerge.sh from the MAIN branch if available — this ensures
+    # branches created before a premerge fix still use the latest version.
+    # Falls back to the branch's own copy if main's doesn't exist.
+    try:
+        main_premerge = subprocess.run(
+            ["git", "show", "main:.delegate/premerge.sh"],
+            cwd=wt_dir, capture_output=True, text=True, timeout=10,
+        )
+        if main_premerge.returncode == 0 and main_premerge.stdout.strip():
+            main_premerge_path = wt_path / ".delegate" / "premerge_from_main.sh"
+            main_premerge_path.write_text(main_premerge.stdout)
+            main_premerge_path.chmod(0o755)
+            test_script = main_premerge_path
+            test_exists = True
+            logger.info("Using premerge.sh from main (not branch) for latest fixes")
+    except (subprocess.TimeoutExpired, OSError):
+        pass  # fall back to branch's own premerge.sh
+
     if not setup_exists:
         logger.warning("%s: .delegate/setup.sh not found — skipping env setup", wt_dir)
     if not test_exists:
@@ -507,7 +550,7 @@ def _run_pre_merge(
     shell_parts: list[str] = []
     if setup_exists:
         shell_parts.append(". ./.delegate/setup.sh")
-    shell_parts.append(". ./.delegate/premerge.sh")
+    shell_parts.append(f". {test_script}")
     shell_cmd = " && ".join(shell_parts)
 
     try:
